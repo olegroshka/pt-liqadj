@@ -118,8 +118,9 @@ def train_loop(
 ) -> Dict[str, Any]:
     """
     Trains a regressor and writes:
-      - ckpt.pt               (state_dict + arch metadata)
+      - ckpt.pt (state_dict + arch metadata)
       - feature_names.json
+      - metrics_val.json (now includes 'best_epoch' and 'history' for tests)
     Returns: {"best_epoch": int, "best_val_mae_bps": float}
     """
     outdir = Path(outdir)
@@ -140,6 +141,9 @@ def train_loop(
     best_mae = math.inf
     best_epoch = -1
     bad = 0
+
+    # ---  keep per-epoch history for the metrics json ---
+    history: List[Dict[str, float]] = []
 
     def _mae(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return (pred - target).abs().mean()
@@ -165,6 +169,10 @@ def train_loop(
             pv = model(xv)
             mae = _mae(pv, yv).item()
 
+        # --- append an epoch record (train loss = mean over batches) ---
+        tr_loss_mean = float(np.mean(tr_losses)) if tr_losses else float("nan")
+        history.append({"epoch": float(epoch), "train_loss": tr_loss_mean, "val_mae": float(mae)})
+
         if mae + 1e-12 < best_mae:
             best_mae = mae
             best_epoch = epoch
@@ -188,15 +196,37 @@ def train_loop(
         if bad >= cfg.patience:
             break
 
+    metrics = {
+        "best_epoch": int(best_epoch),
+        "best_val_mae_bps": float(best_mae),
+        # keep legacy keys for compatibility
+        "epoch": int(best_epoch),
+        "val_mae": float(best_mae),
+        # new detailed history
+        "history": history,
+    }
+    (outdir / "metrics_val.json").write_text(json.dumps(metrics, indent=2))
+
     return {"best_epoch": best_epoch, "best_val_mae_bps": float(best_mae)}
 
 
-def load_model_for_eval(models_dir: Path, in_dim: int, device: str = "cpu") -> Tuple[nn.Module, torch.device]:
+
+def load_model_for_eval(
+    models_dir: Path,
+    in_dim: int,
+    device: str = "cpu",
+    *,
+    hidden: Optional[Iterable[int]] = None,   # NEW: accept legacy kwarg
+    dropout: Optional[float] = None,          # NEW: accept legacy kwarg
+    **_: Any,                                 # absorb any extra unexpected kwargs
+) -> Tuple[nn.Module, torch.device]:
     """
     Loads the best checkpoint and returns a ready-to-eval model on the given device.
+
     Backward compatible:
-      - If arch metadata exists, we use it.
-      - Else we fall back to (hidden=[64,64], dropout=0.0) with provided in_dim.
+      - Accepts legacy kwargs like `hidden` and `dropout`.
+      - If arch metadata exists in ckpt, we use it unless explicitly overridden.
+      - Else we fall back to defaults with provided `in_dim`.
     """
     models_dir = Path(models_dir)
     ckpt_path = models_dir / "ckpt.pt"
@@ -205,16 +235,29 @@ def load_model_for_eval(models_dir: Path, in_dim: int, device: str = "cpu") -> T
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
     arch = ckpt.get("arch", {}) if isinstance(ckpt, dict) else {}
+
+    # read arch from ckpt, but allow explicit overrides from kwargs
     mtype = arch.get("model_type", "mlp")
     in_dim_ckpt = int(arch.get("in_dim", in_dim))
-    hidden = arch.get("hidden", [64, 64])
-    dropout = float(arch.get("dropout", 0.0))
+    hidden_final = list(arch.get("hidden", [64, 64]))
+    dropout_final = float(arch.get("dropout", 0.0))
 
-    # model factory (only 'mlp' for now)
-    cfg = TrainConfig(hidden=hidden, dropout=dropout, device=device, model_type=mtype)
+    if hidden is not None:
+        hidden_final = list(map(int, hidden))
+    if dropout is not None:
+        dropout_final = float(dropout)
+
+    # build model
+    cfg = TrainConfig(
+        hidden=hidden_final,
+        dropout=dropout_final,
+        device=device,
+        model_type=mtype,
+    )
     dev = _resolve_device(cfg.device)
     model = _build_model(in_dim_ckpt, cfg).to(dev)
 
+    # load weights
     state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
     model.load_state_dict(state, strict=True)
     model.eval()

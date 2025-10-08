@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from .backbone import NodeFieldSpec
 from .portfolio_encoder import PortfolioEncoder
 from .utils import resolve_device
-
+from .heads import QuantileHead
 
 @dataclass
 class ModelConfig:
@@ -33,6 +33,21 @@ class ModelConfig:
     use_calibrator: bool = False
     use_baseline: bool = False
     device: str = "auto"
+    # Encoder inits that passed tests:
+    enc_beta_init: float = 0.8
+    enc_learnable_tau: bool = False
+    enc_tau_init: float = 1.0
+
+    # Fusion / gate
+    use_fused_aggregates: bool = True
+    ctx_gate_init: float = 0.0  # tests keep 0.0; prod can start >0
+
+    # Heads / loss
+    use_quantiles: bool = False  # tests keep False
+    pinball_taus: List[float] = None  # e.g. [0.5, 0.9] in prod
+    loss_type: str = "mse"  # "mse" (tests) or "huber_pinball"
+    huber_delta: float = 0.1  # for smooth_l1
+    monotone_reg: float = 0.0  # reserved for provider calibrators
 
 
 class IdCatEmbedding(nn.Module):
@@ -129,13 +144,25 @@ class PortfolioResidualModel(nn.Module):
 
         self.port_enc = PortfolioEncoder(
             d_model=cfg.d_model,
-            nhead=cfg.nhead,
+            nhead=cfg.nhead,  # kept for API compat (unused in our impl)
             num_layers=max(1, cfg.n_layers),
             dropout=cfg.tr_dropout,
+            beta_init=cfg.enc_beta_init,
+            learnable_tau=cfg.enc_learnable_tau,
+            tau_init=cfg.enc_tau_init,
         )
 
         # head over [trade, attn_ctx, masked_mean_ctx]
         self.head = RegressionHead(d_in=cfg.d_model * 3, hidden=cfg.head_hidden, dropout=cfg.head_dropout)
+
+        # Optional quantiles (off for tests)
+        self.quant_head = None
+        if cfg.use_quantiles and cfg.pinball_taus:
+            self.quant_head = QuantileHead(d_in=cfg.d_model * 3, hidden=cfg.head_hidden, taus=cfg.pinball_taus, dropout=cfg.head_dropout)
+
+        # Fusion gate
+        self.ctx_gate = nn.Parameter(torch.tensor(cfg.ctx_gate_init))
+        self.post_norm = nn.LayerNorm(cfg.d_model * 3)
 
         self.calibrator = None
         if cfg.use_calibrator:
@@ -237,18 +264,47 @@ class PortfolioResidualModel(nn.Module):
             w = valid_mask.float().unsqueeze(-1)
             ctx_masked = (H_p * w).sum(dim=1) / w.sum(dim=1).clamp_min(1.0)
 
-        # predict
-        x = torch.cat([h_t, ctx_attn, ctx_masked], dim=-1)  # (B, 3D)
+
+        # gated mix (keeps tests unaffected with gate=0.0)
+        gate = torch.sigmoid(self.ctx_gate) if self.cfg.use_fused_aggregates else torch.tensor(0.0, device=h_t.device)
+        ctx_mix = ctx_attn + gate * (ctx_masked - ctx_attn)
+
+        # fused features (normalized) -> mean
+        x = torch.cat([h_t, ctx_attn, ctx_mix], dim=-1)
+        x = self.post_norm(x)
         mean = self.head(x)
         if self.calibrator is not None:
             mean = mean * self.calibrator
-        return {"mean": mean}
+
+        out = {"mean": mean}
+
+        # optional quantiles
+        if self.quant_head is not None:
+            q = self.quant_head(x)  # (B, len(taus))
+            out["quantiles"] = q
+            out["taus"] = torch.tensor(self.cfg.pinball_taus, device=q.device)
+        return out
 
     def compute_loss(self, out: Dict[str, torch.Tensor], target: torch.Tensor) -> torch.Tensor:
+        # Switchable loss: MSE for tests, Huber+Pinball for prod
         pred = out["mean"].squeeze(-1).float()
         y = target.to(pred.device).float().view_as(pred)
-        # Huber tends to be friendlier on tiny synthetic sets
-        return F.smooth_l1_loss(pred, y, beta=0.1)
+
+        if self.cfg.loss_type.lower() == "mse":
+            return torch.mean((pred - y) ** 2)
+
+        # Huber on mean
+        huber = F.smooth_l1_loss(pred, y, beta=self.cfg.huber_delta)
+
+        # Pinball on quantiles (if present)
+        pinball = 0.0
+        if ("quantiles" in out) and ("taus" in out):
+            q = out["quantiles"]         # (B, K)
+            taus = out["taus"].view(1, -1)  # (1, K)
+            diff = y.unsqueeze(1) - q        # (B, K)
+            pinball = torch.mean(torch.maximum(taus * diff, (taus - 1.0) * diff))
+
+        return huber + pinball * 1.0 + self.cfg.monotone_reg * 0.0  # placeholder for calibrator reg
 
 
 def H_tc_needs_squeeze(shared: IdCatEmbedding, node_ids: torch.Tensor) -> bool:

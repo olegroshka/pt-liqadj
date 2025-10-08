@@ -4,12 +4,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Iterable, List, Optional, Tuple, Union, Dict, Any
 
 import numpy as np
 import pandas as pd
 import torch
 
+from ptliq.model.baseline import MLPRegressor
 
 # ---------------------------
 # Public container used by GNN
@@ -31,6 +32,113 @@ class GraphInputs:
     node_to_sector: torch.Tensor            # [N] sector id per node
     n_nodes: int                            # total universe size (distinct ISINs)
 
+
+
+# ---------- device helper ----------
+
+def resolve_device(device: str | torch.device = "cpu") -> torch.device:
+    if isinstance(device, torch.device):
+        return device
+    d = (device or "cpu").lower()
+    if d in ("auto", "cuda", "gpu"):
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device("cpu")
+
+
+# ---------- baseline model loader used by service/backtest ----------
+
+def _read_train_config(model_dir: Path) -> tuple[list[int], float]:
+    """Backwards compatible: read hidden/dropout if present; fall back to defaults."""
+    hidden = [64, 64]
+    dropout = 0.0
+    p = Path(model_dir) / "train_config.json"
+    if p.exists():
+        try:
+            cfg = json.loads(p.read_text())
+            hidden = cfg.get("hidden", hidden)
+            dropout = float(cfg.get("dropout", dropout))
+        except Exception:
+            pass
+    return hidden, dropout
+
+
+def _find_ckpt(model_dir: Path) -> Path:
+    md = Path(model_dir)
+    for name in ("ckpt.pt", "ckpt_best.pt", "checkpoint.pt"):
+        p = md / name
+        if p.exists():
+            return p
+    # Last resort: any .pt in dir
+    pts = sorted(md.glob("*.pt"))
+    if not pts:
+        raise FileNotFoundError(f"No checkpoint found under {model_dir}")
+    return pts[-1]
+
+
+def _extract_state_dict(obj: Any) -> Dict[str, torch.Tensor]:
+    """Accept raw state_dict OR a dict with 'state_dict' field."""
+    if isinstance(obj, dict):
+        if "state_dict" in obj and isinstance(obj["state_dict"], dict):
+            return obj["state_dict"]
+        # Some packers store raw state dict directly
+        # (keys like 'net.0.weight', ...). Detect by a typical key.
+        has_linear = any(k.endswith(".weight") for k in obj.keys())
+        if has_linear:
+            return obj  # already a state dict
+    raise RuntimeError(
+        "Unsupported checkpoint format: expected a raw state_dict or a dict with 'state_dict'."
+    )
+
+
+def load_model_for_eval(
+    model_dir: Union[str, Path],
+    *,
+    in_dim: int,
+    hidden: Optional[Iterable[int]] = None,
+    dropout: float = 0.0,
+    device: str | torch.device = "cpu",
+    **kwargs,
+) -> tuple[torch.nn.Module, torch.device]:
+    """
+    Backwards compatible loader for the baseline MLP used by:
+      - tests/backtest protocol
+      - service scoring
+      - report generation
+
+    Accepts older callers passing (hidden=..., dropout=...).
+    If not provided, will read train_config.json in model_dir with sensible defaults.
+    """
+    model_dir = Path(model_dir)
+    dev = resolve_device(device)
+
+    # Fill in arch if not given (for legacy callers we still read the file)
+    if hidden is None:
+        hidden, dropout_file = _read_train_config(model_dir)
+        # allow CLI-provided dropout to override file if it was passed explicitly
+        if "dropout" not in kwargs:
+            dropout = dropout_file
+    hidden = list(map(int, hidden))
+
+    # Build model
+    model = MLPRegressor(in_dim=in_dim, hidden=hidden, dropout=float(dropout)).to(dev)
+    model.eval()
+
+    # Load checkpoint (robust to various shapes)
+    ckpt_path = _find_ckpt(model_dir)
+    raw = torch.load(ckpt_path, map_location="cpu")
+    try:
+        state_dict = _extract_state_dict(raw)
+    except RuntimeError:
+        # Some older training code saved whole training bundles {state_dict, epoch, val_mae, arch}
+        # Try to recover gracefully.
+        if isinstance(raw, dict) and "arch" in raw and "state_dict" in raw:
+            state_dict = raw["state_dict"]
+        else:
+            raise
+
+    # Strict=True to fail loud if shapes are inconsistent; in practice they match.
+    model.load_state_dict(state_dict, strict=True)
+    return model.to(dev).eval(), dev
 
 # ---------------------------
 # Helpers

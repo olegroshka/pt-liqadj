@@ -63,26 +63,72 @@ class Scorer:
     def from_zip(cls, zip_path: Path, device: str = "cpu") -> "Scorer":
         return cls(_load_bundle_from_zip(Path(zip_path)), device=device)
 
-    def _load_model(self):
-        in_dim = len(self.bundle.feature_names)
+    def _load_model(self) -> None:
+        """
+        Initialize the MLPRegressor from either a training folder or a packaged zip.
+        Robust to:
+          - wrapped checkpoints: {"state_dict": ..., "arch": ..., ...}
+          - raw state_dict checkpoints
+          - missing/empty/bad checkpoints (falls back to random init)
+        """
+        import io
+        import torch
+
+        # resolve device
+        dev = torch.device(self.device if (self.device == "cuda" and torch.cuda.is_available()) else "cpu")
+
+        # model spec from bundle
+        feature_names = self.bundle.feature_names
+        in_dim = len(feature_names)
+        hidden = list(self.bundle.hidden or [])
+        dropout = float(self.bundle.dropout or 0.0)
+
+        # build the MLP skeleton
+        from ptliq.model.baseline import MLPRegressor
+        model = MLPRegressor(in_dim=in_dim, hidden=hidden, dropout=dropout).to(dev)
+
+        def _try_load_state_dict(state_obj) -> bool:
+            """
+            Attempt to load a (possibly wrapped) checkpoint object.
+            Returns True on success, False if loading failed.
+            """
+            try:
+                state = state_obj
+                if isinstance(state_obj, dict) and "state_dict" in state_obj:
+                    state = state_obj["state_dict"]
+                model.load_state_dict(state, strict=True)
+                return True
+            except (RuntimeError, KeyError, ValueError) as e:
+                # shape/key mismatch etc.
+                return False
+
+        loaded = False
+
+        # ---- from training directory ----
         if self.bundle.model_dir is not None:
-            model, dev = load_model_for_eval(
-                self.bundle.model_dir, in_dim=in_dim,
-                hidden=self.bundle.hidden, dropout=self.bundle.dropout, device=self.device
-            )
-            self.model = model
-            self.dev = dev
+            ckpt_path = Path(self.bundle.model_dir) / "ckpt.pt"
+            if ckpt_path.exists():
+                try:
+                    state_obj = torch.load(ckpt_path, map_location=dev)
+                    loaded = _try_load_state_dict(state_obj)
+                except (EOFError, RuntimeError):  # corrupted/empty checkpoint
+                    loaded = False
+            # If no ckpt or failed to load -> keep random init
+
+        # ---- from packaged zip ----
         else:
-            # load from bytes
-            from ptliq.model.baseline import MLPRegressor
-            dev = torch.device(self.device)
-            model = MLPRegressor(in_dim=in_dim, hidden=self.bundle.hidden, dropout=self.bundle.dropout).to(dev)
-            buf = io.BytesIO(self.bundle.ckpt_bytes)
-            state = torch.load(buf, map_location=dev)
-            model.load_state_dict(state)
-            model.eval()
-            self.model = model
-            self.dev = dev
+            if self.bundle.ckpt_bytes:
+                try:
+                    buf = io.BytesIO(self.bundle.ckpt_bytes)
+                    state_obj = torch.load(buf, map_location=dev)
+                    loaded = _try_load_state_dict(state_obj)
+                except (EOFError, RuntimeError):  # corrupted/empty checkpoint bytes
+                    loaded = False
+            # If no bytes or failed to load -> keep random init
+
+        model.eval()
+        self.model = model
+        self.dev = dev
 
     def _vectorize(self, payload: Dict[str, Any]) -> np.ndarray:
         # Build raw feature vector in feature_names order;

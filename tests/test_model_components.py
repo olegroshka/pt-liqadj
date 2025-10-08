@@ -5,7 +5,7 @@ from ptliq.model.portfolio_encoder import PortfolioEncoder
 def test_portfolio_encoder_masks_padding():
     torch.manual_seed(0)
     B, T, D = 2, 5, 16
-    enc = PortfolioEncoder(d_model=D, nhead=4, num_layers=1, dropout=0.0)
+    enc = PortfolioEncoder(d_model=D, beta_init=0.8, learnable_tau=False, tau_init=1.0)
 
     # Build a portfolio where only the first 2 items are valid; the rest are zeros
     H_p = torch.randn(B, T, D)
@@ -27,7 +27,7 @@ def test_portfolio_encoder_masks_padding():
 def test_portfolio_encoder_focus_signal():
     torch.manual_seed(1)
     B, T, D = 2, 6, 32
-    enc = PortfolioEncoder(d_model=D, nhead=4, num_layers=1, dropout=0.0)
+    enc = PortfolioEncoder(d_model=D, beta_init=0.8, learnable_tau=False, tau_init=1.0)
 
     # Create portfolios where item 3 encodes the signal; others are noise.
     H_p = torch.randn(B, T, D) * 0.1
