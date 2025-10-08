@@ -1,0 +1,51 @@
+from __future__ import annotations
+from pathlib import Path
+import json
+import logging
+import typer
+from rich import print
+from datetime import datetime
+
+from ptliq.utils.logging import setup_logging
+from ptliq.data.validate import validate_raw
+
+app = typer.Typer(no_args_is_help=True)
+
+@app.command()
+def app_main(
+    rawdir: Path = typer.Option(Path("data/raw/sim"), help="Directory containing raw parquet tables"),
+    outdir: Path = typer.Option(Path("data/interim/validated"), help="Where to write validation report"),
+    fail_on_error: bool = typer.Option(True, help="Exit with non-zero code if validation fails"),
+    loglevel: str = typer.Option("INFO", help="Log level (DEBUG|INFO|WARNING|ERROR|CRITICAL)"),
+):
+    """
+    Validate raw data (schema, keys, referential integrity). Writes a JSON report.
+    """
+    setup_logging(loglevel)
+    logging.info("Validating rawdir=%s", rawdir)
+    report = validate_raw(rawdir)
+
+    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / f"validation_report_{stamp}.json"
+    with open(outpath, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    if report["passed"]:
+        print(f"[bold green]VALIDATION PASSED[/bold green]  report: {outpath}")
+        raise typer.Exit(code=0)
+    else:
+        print(f"[bold red]VALIDATION FAILED[/bold red]  report: {outpath}")
+        for t in report.get("tables", []):
+            if not t.get("passed", False):
+                print(f"  • table={t['table']} errors={t.get('errors')}")
+        if report.get("cross_checks"):
+            print(f"  • cross={report['cross_checks']}")
+        raise typer.Exit(code=1 if fail_on_error else 0)
+
+# expose Typer app for console_scripts target
+app = app
+
+if __name__ == "__main__":
+    app()

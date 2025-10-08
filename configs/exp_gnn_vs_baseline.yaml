@@ -1,0 +1,34 @@
+project:
+  name: pt-liqadj
+  seed: 42
+  run_id: exp_gnn_vs_baseline
+
+paths:
+  raw_dir: data/raw/sim
+  interim_dir: data/interim
+  features_dir: data/features
+  models_dir: models
+  reports_dir: reports
+
+data:
+  sim:
+    n_bonds: 1500
+    n_days: 30
+    providers: ["P1","P2"]
+    seed: 11
+
+split:
+  train_end: "2025-01-18"
+  val_end: "2025-01-24"
+
+gnn_train:
+  device: "auto"       # "auto" picks CUDA if available
+  max_epochs: 40
+  patience: 6
+  batch_size: 1024
+  lr: 3e-4
+  n_layers: 2
+  nhead: 4
+  d_model: 128
+  gnn_out_dim: 128
+  gnn_num_hidden: 64

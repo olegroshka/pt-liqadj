@@ -1,0 +1,17 @@
+project:
+  name: pt-liqadj
+  seed: 42
+
+paths:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  features_dir: data/features
+  models_dir: models
+  reports_dir: reports
+
+data:
+  sim:
+    n_bonds: 200
+    n_days: 5
+    providers: ["P1","P2","P3"]
+    seed: 7

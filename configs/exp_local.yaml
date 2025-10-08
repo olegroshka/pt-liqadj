@@ -1,0 +1,32 @@
+project:
+  name: pt-liqadj
+  seed: 42
+  run_id: exp_local
+
+paths:
+  raw_dir: data/raw/sim
+  interim_dir: data/interim
+  features_dir: data/features
+  models_dir: models
+  reports_dir: reports
+
+data:
+  sim:
+    n_bonds: 120
+    n_days: 4
+    providers: ["P1", "P2"]
+    seed: 7
+
+split:
+  train_end: "2025-01-03"   # simulator starts 2025-01-02
+  val_end:   "2025-01-04"
+
+train:
+  device: "cpu"
+  max_epochs: 4
+  batch_size: 512
+  lr: 0.001
+  patience: 2
+  hidden: [32]
+  dropout: 0.0
+  seed: 42

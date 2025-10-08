@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pt-liqadj"
+version = "0.1.0"
+dependencies = ["pydantic", "pyarrow", "pandas", "numpy", "pyyaml", "typer", "rich", "torch", "fastapi", "uvicorn"]
+
+[project.scripts]
+ptliq-simulate = "ptliq.cli.simulate:app"
+ptliq-ingest = "ptliq.cli.ingest:app"
+ptliq-validate = "ptliq.cli.validate:app"
+ptliq-split = "ptliq.cli.split:app"
+ptliq-featurize = "ptliq.cli.featurize:app"
+ptliq-train = "ptliq.cli.train:app"
+ptliq-eval = "ptliq.cli.eval:app"
+ptliq-backtest = "ptliq.cli.backtest:app"
+ptliq-report = "ptliq.cli.report:app"
+ptliq-pack = "ptliq.cli.pack:app"
+ptliq-serve = "ptliq.cli.serve:app"
+ptliq-score = "ptliq.cli.score:app"
+ptliq-run = "ptliq.cli.run:app"
+
+ptliq-exp = "ptliq.cli.exp_gnn_vs_baseline:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ptliq*"]
+exclude = ["tests*", "notebooks*", "data*", "models*", "configs*", "reports*", "examples*"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff", "mypy", "types-PyYAML"]
+
+# (optional) if you have non-.py files inside ptliq you want included:
+# [tool.setuptools.package-data]
+# ptliq = ["**/*.yaml", "**/*.yml", "**/*.json", "**/*.txt"]
