@@ -1,6 +1,3 @@
-here’s a complete `README.md` you can drop in at the repo root.
-
-````markdown
 # PT-LiqAdj — Portfolio-aware Liquidity Adjustment (GNN + Transformer)
 
 PT-LiqAdj is a small research/engineering project that explores **portfolio-aware** price/liquidity adjustments.  
