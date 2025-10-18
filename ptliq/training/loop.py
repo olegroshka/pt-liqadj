@@ -1,12 +1,10 @@
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Dict, Any, Optional, Tuple
 
 import json
 import math
-import time
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -27,9 +25,9 @@ class TrainConfig:
     dropout: float = 0.0
     seed: int = 42
 
-    # NEW: future-proofing (does not change current behavior)
-    model_type: str = "mlp"          # "mlp" (default) | "gnn_xfmr" (next step)
-    model_params: Dict[str, Any] = None  # extra per-model kwargs
+    # future-proof hooks; harmless for current tests
+    model_type: str = "mlp"          # "mlp" (default) | "gnn_xfmr"
+    model_params: Dict[str, Any] = None
 
     def __post_init__(self):
         if self.hidden is None:
@@ -59,9 +57,7 @@ def _set_seed(seed: int):
 # Models
 # -----------------------------
 class MLPRegressor(nn.Module):
-    """
-    Simple MLP: [in_dim] -> hidden* -> 1
-    """
+    """Simple MLP: [in_dim] -> hidden* -> 1"""
     def __init__(self, in_dim: int, hidden: Iterable[int] = (64, 64), dropout: float = 0.0):
         super().__init__()
         layers: List[nn.Module] = []
@@ -79,19 +75,13 @@ class MLPRegressor(nn.Module):
 
 
 def _build_model(in_dim: int, cfg: TrainConfig) -> nn.Module:
-    """
-    Factory. 'mlp' is the default (all existing code/tests).
-    We also accept 'gnn_xfmr' here so checkpoints can carry model_type,
-    but the *training path* for gnn lives in ptliq.training.gnn_loop.
-    """
     mtype = (cfg.model_type or "mlp").lower()
     if mtype == "mlp":
         return MLPRegressor(in_dim, hidden=cfg.hidden, dropout=cfg.dropout)
     elif mtype == "gnn_xfmr":
-        # We intentionally do not construct the GNN here because that model
-        # needs graph tensors rather than a plain feature matrix.
+        # kept as guardrail: tabular path isn't for GNN training
         raise ValueError(
-            "model_type='gnn_xfmr' is trained via ptliq.training.gnn_loop.train_gnn ; "
+            "model_type='gnn_xfmr' is trained via ptliq.training.gnn_loop.train_gnn; "
             "use the MLP path for tabular features."
         )
     else:
@@ -118,9 +108,9 @@ def train_loop(
 ) -> Dict[str, Any]:
     """
     Trains a regressor and writes:
-      - ckpt.pt (state_dict + arch metadata)
+      - ckpt.pt (state_dict + arch metadata) — guaranteed to exist by the end
       - feature_names.json
-      - metrics_val.json (now includes 'best_epoch' and 'history' for tests)
+      - metrics_val.json (includes 'best_epoch' and 'history')
     Returns: {"best_epoch": int, "best_val_mae_bps": float}
     """
     outdir = Path(outdir)
@@ -142,7 +132,6 @@ def train_loop(
     best_epoch = -1
     bad = 0
 
-    # ---  keep per-epoch history for the metrics json ---
     history: List[Dict[str, float]] = []
 
     def _mae(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -159,7 +148,7 @@ def train_loop(
             opt.zero_grad()
             loss.backward()
             opt.step()
-            tr_losses.append(loss.detach().item())
+            tr_losses.append(float(loss.detach().item()))
 
         # validation
         model.eval()
@@ -167,17 +156,23 @@ def train_loop(
             xv = torch.from_numpy(X_val).to(dev)
             yv = torch.from_numpy(y_val).to(dev)
             pv = model(xv)
-            mae = _mae(pv, yv).item()
+            mae_t = _mae(pv, yv)
+            mae = float(mae_t.detach().cpu().item())
 
-        # --- append an epoch record (train loss = mean over batches) ---
-        tr_loss_mean = float(np.mean(tr_losses)) if tr_losses else float("nan")
-        history.append({"epoch": float(epoch), "train_loss": tr_loss_mean, "val_mae": float(mae)})
+        # ensure finiteness (history stays numeric)
+        if not np.isfinite(mae):
+            mae = float("inf")
+
+        history.append({
+            "epoch": float(epoch),
+            "train_loss": float(np.mean(tr_losses)) if tr_losses else float("nan"),
+            "val_mae": mae,
+        })
 
         if mae + 1e-12 < best_mae:
             best_mae = mae
             best_epoch = epoch
             bad = 0
-            # save checkpoint with arch metadata to guarantee future loads
             ckpt = {
                 "state_dict": model.state_dict(),
                 "arch": {
@@ -196,13 +191,29 @@ def train_loop(
         if bad >= cfg.patience:
             break
 
+    # --- guarantee ckpt.pt exists even if val was inf/NaN and never improved ---
+    ckpt_path = outdir / "ckpt.pt"
+    if not ckpt_path.exists():
+        fallback = {
+            "state_dict": model.state_dict(),
+            "arch": {
+                "model_type": cfg.model_type,
+                "in_dim": in_dim,
+                "hidden": list(cfg.hidden),
+                "dropout": float(cfg.dropout),
+            },
+            "epoch": int(epoch),               # last epoch reached
+            "val_mae": float(best_mae),        # likely inf if never improved
+            "note": "fallback_no_improvement", # helps debugging
+        }
+        torch.save(fallback, ckpt_path)
+
     metrics = {
         "best_epoch": int(best_epoch),
         "best_val_mae_bps": float(best_mae),
-        # keep legacy keys for compatibility
+        # legacy keys for compatibility
         "epoch": int(best_epoch),
         "val_mae": float(best_mae),
-        # new detailed history
         "history": history,
     }
     (outdir / "metrics_val.json").write_text(json.dumps(metrics, indent=2))
@@ -210,23 +221,19 @@ def train_loop(
     return {"best_epoch": best_epoch, "best_val_mae_bps": float(best_mae)}
 
 
-
 def load_model_for_eval(
     models_dir: Path,
     in_dim: int,
     device: str = "cpu",
     *,
-    hidden: Optional[Iterable[int]] = None,   # NEW: accept legacy kwarg
-    dropout: Optional[float] = None,          # NEW: accept legacy kwarg
-    **_: Any,                                 # absorb any extra unexpected kwargs
+    hidden: Optional[Iterable[int]] = None,   # legacy override
+    dropout: Optional[float] = None,          # legacy override
+    **_: Any,                                 # absorb extras
 ) -> Tuple[nn.Module, torch.device]:
     """
-    Loads the best checkpoint and returns a ready-to-eval model on the given device.
-
-    Backward compatible:
-      - Accepts legacy kwargs like `hidden` and `dropout`.
-      - If arch metadata exists in ckpt, we use it unless explicitly overridden.
-      - Else we fall back to defaults with provided `in_dim`.
+    Load eval-ready model with backward compatibility:
+    - Accept legacy kwargs (`hidden`, `dropout`).
+    - Prefer arch metadata from ckpt unless explicitly overridden.
     """
     models_dir = Path(models_dir)
     ckpt_path = models_dir / "ckpt.pt"
@@ -236,7 +243,6 @@ def load_model_for_eval(
     ckpt = torch.load(ckpt_path, map_location="cpu")
     arch = ckpt.get("arch", {}) if isinstance(ckpt, dict) else {}
 
-    # read arch from ckpt, but allow explicit overrides from kwargs
     mtype = arch.get("model_type", "mlp")
     in_dim_ckpt = int(arch.get("in_dim", in_dim))
     hidden_final = list(arch.get("hidden", [64, 64]))
@@ -247,7 +253,6 @@ def load_model_for_eval(
     if dropout is not None:
         dropout_final = float(dropout)
 
-    # build model
     cfg = TrainConfig(
         hidden=hidden_final,
         dropout=dropout_final,
@@ -257,7 +262,6 @@ def load_model_for_eval(
     dev = _resolve_device(cfg.device)
     model = _build_model(in_dim_ckpt, cfg).to(dev)
 
-    # load weights
     state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
     model.load_state_dict(state, strict=True)
     model.eval()

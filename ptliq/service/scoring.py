@@ -74,70 +74,56 @@ class Scorer:
         import io
         import torch
 
-        # resolve device
         dev = torch.device(self.device if (self.device == "cuda" and torch.cuda.is_available()) else "cpu")
 
-        # model spec from bundle
         feature_names = self.bundle.feature_names
         in_dim = len(feature_names)
         hidden = list(self.bundle.hidden or [])
         dropout = float(self.bundle.dropout or 0.0)
 
-        # build the MLP skeleton
         from ptliq.model.baseline import MLPRegressor
         model = MLPRegressor(in_dim=in_dim, hidden=hidden, dropout=dropout).to(dev)
 
         def _try_load_state_dict(state_obj) -> bool:
-            """
-            Attempt to load a (possibly wrapped) checkpoint object.
-            Returns True on success, False if loading failed.
-            """
             try:
                 state = state_obj
                 if isinstance(state_obj, dict) and "state_dict" in state_obj:
                     state = state_obj["state_dict"]
                 model.load_state_dict(state, strict=True)
                 return True
-            except (RuntimeError, KeyError, ValueError) as e:
-                # shape/key mismatch etc.
+            except (RuntimeError, KeyError, ValueError):
                 return False
 
         loaded = False
 
-        # ---- from training directory ----
         if self.bundle.model_dir is not None:
             ckpt_path = Path(self.bundle.model_dir) / "ckpt.pt"
             if ckpt_path.exists():
                 try:
                     state_obj = torch.load(ckpt_path, map_location=dev)
                     loaded = _try_load_state_dict(state_obj)
-                except (EOFError, RuntimeError):  # corrupted/empty checkpoint
+                except (EOFError, RuntimeError):
                     loaded = False
-            # If no ckpt or failed to load -> keep random init
-
-        # ---- from packaged zip ----
         else:
             if self.bundle.ckpt_bytes:
                 try:
                     buf = io.BytesIO(self.bundle.ckpt_bytes)
                     state_obj = torch.load(buf, map_location=dev)
                     loaded = _try_load_state_dict(state_obj)
-                except (EOFError, RuntimeError):  # corrupted/empty checkpoint bytes
+                except (EOFError, RuntimeError):
                     loaded = False
-            # If no bytes or failed to load -> keep random init
 
         model.eval()
         self.model = model
         self.dev = dev
 
     def _vectorize(self, payload: Dict[str, Any]) -> np.ndarray:
-        # Build raw feature vector in feature_names order;
-        # if missing, use scaler mean to avoid biasing after standardization.
-        raw = np.array([
-            float(payload.get(name, float(self.bundle.mean[i])))
-            for i, name in enumerate(self.bundle.feature_names)
-        ], dtype=np.float32)
-        # standardize
+        # Raw vector in canonical order; fall back to scaler mean for missing keys.
+        raw = np.array(
+            [float(payload.get(name, float(self.bundle.mean[i]))) for i, name in enumerate(self.bundle.feature_names)],
+            dtype=np.float32,
+        )
+        # Standardize; guard against zero std → inf/NaN
         X = (raw - self.bundle.mean) / self.bundle.std
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
         return X
@@ -148,8 +134,8 @@ class Scorer:
         X = np.stack([self._vectorize(r) for r in rows]).astype(np.float32)
         with torch.no_grad():
             y = self.model(torch.from_numpy(X).to(self.dev)).cpu().numpy().astype(np.float32)
-        # robust shape handling
         if y.ndim == 2 and y.shape[1] == 1:
             y = y[:, 0]
+        # ---- sanitize for API/JSON safety ----
+        y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
         return y  # shape (N,)
-

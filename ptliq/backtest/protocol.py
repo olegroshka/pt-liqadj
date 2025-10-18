@@ -30,7 +30,7 @@ def run_backtest(features_dir: Path, run_id: str, models_dir: Path, outdir: Path
     X_test = apply_standardizer(test_df, feat_cols, stdz)
     y_test = test_df["y_bps"].astype(float).to_numpy().astype(np.float32)
 
-    # NEW: try to read hidden/dropout from saved train_config
+    # try to read hidden/dropout from saved train_config
     hidden = [64, 64]
     dropout = 0.0
     cfg_path = models_dir / "train_config.json"

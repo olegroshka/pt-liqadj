@@ -9,10 +9,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
+def _finite(a: np.ndarray) -> np.ndarray:
+    """Return boolean mask of finite values for a 1D array."""
+    return np.isfinite(a)
+
+
 def _load_residuals(backtest_dir: Path) -> Optional[np.ndarray]:
     """
     Try to find residuals in common files written by backtest.
-    Returns an array of residuals in bps, or None if not found.
+    Returns an array of residuals in bps (finite only), or None if not found.
     """
     backtest_dir = Path(backtest_dir)
     candidates = [
@@ -26,10 +31,7 @@ def _load_residuals(backtest_dir: Path) -> Optional[np.ndarray]:
         if not p.exists():
             continue
         try:
-            if p.suffix.lower() in {".parquet", ".pq"}:
-                df = pd.read_parquet(p)
-            else:
-                df = pd.read_csv(p)
+            df = pd.read_parquet(p) if p.suffix.lower() in {".parquet", ".pq"} else pd.read_csv(p)
         except Exception:
             continue
 
@@ -38,14 +40,18 @@ def _load_residuals(backtest_dir: Path) -> Optional[np.ndarray]:
         for k in ("resid_bps", "residual_bps", "residual"):
             if k in cols:
                 a = df[cols[k]].to_numpy(dtype=float)
-                return a
+                a = a[_finite(a)]
+                return a if a.size else np.array([], dtype=float)
         # compute y - pred if present
         ycol = cols.get("y_bps") or cols.get("y") or cols.get("target")
         pcol = cols.get("pred_bps") or cols.get("pred") or cols.get("prediction")
         if ycol and pcol:
-            a = (df[cols[ycol]].to_numpy(dtype=float)
-                 - df[cols[pcol]].to_numpy(dtype=float))
-            return a
+            y = df[cols[ycol]].to_numpy(dtype=float)
+            pr = df[cols[pcol]].to_numpy(dtype=float)
+            m = _finite(y) & _finite(pr)
+            a = (y[m] - pr[m])
+            a = a[_finite(a)]
+            return a if a.size else np.array([], dtype=float)
     return None
 
 
@@ -70,22 +76,30 @@ def render_report(backtest_dir: Path) -> Dict[str, Path]:
 
     # ---- Calibration plot ----
     cal = metrics.get("calibration") or {}
-    bins = np.asarray(cal.get("bin", []), dtype=float)
     pred_mean = np.asarray(cal.get("pred_mean", []), dtype=float)
     y_mean = np.asarray(cal.get("y_mean", []), dtype=float)
 
+    # keep only finite pairs
+    m = _finite(pred_mean) & _finite(y_mean)
+    x = pred_mean[m]
+    y = y_mean[m]
+
     cal_path = figs / "calibration.png"
-    if bins.size and pred_mean.size and pred_mean.size == y_mean.size:
-        x = pred_mean
-        y = y_mean
+    if x.size and y.size:
         lo = float(min(x.min(), y.min()))
         hi = float(max(x.max(), y.max()))
-        plt.figure()
-        plt.plot([lo, hi], [lo, hi], linestyle="--", linewidth=1)
-        plt.scatter(x, y)
-        plt.xlabel("Mean prediction (bps)")
-        plt.ylabel("Mean observed (bps)")
-        plt.title("Calibration")
+        if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+            # degenerate -> safe fallback
+            plt.figure()
+            plt.title("Calibration (no data)")
+            plt.axis("off")
+        else:
+            plt.figure()
+            plt.plot([lo, hi], [lo, hi], linestyle="--", linewidth=1)
+            plt.scatter(x, y)
+            plt.xlabel("Mean prediction (bps)")
+            plt.ylabel("Mean observed (bps)")
+            plt.title("Calibration")
         plt.tight_layout()
         plt.savefig(cal_path, dpi=150)
         plt.close()
@@ -102,12 +116,19 @@ def render_report(backtest_dir: Path) -> Dict[str, Path]:
     if resid is None:
         # fallback: approximate residuals from calibration deltas weighted by n
         cal_n = np.asarray(cal.get("n", []), dtype=float)
-        if pred_mean.size and y_mean.size and cal_n.size == pred_mean.size:
-            delta = (y_mean - pred_mean)
-            reps = np.clip(cal_n.astype(int), 1, None)
+        pred_mean = np.asarray(cal.get("pred_mean", []), dtype=float)
+        y_mean = np.asarray(cal.get("y_mean", []), dtype=float)
+        m = _finite(pred_mean) & _finite(y_mean) & _finite(cal_n)
+        if pred_mean.size and y_mean.size and cal_n.size and m.any():
+            delta = (y_mean[m] - pred_mean[m])
+            reps = np.clip(cal_n[m].astype(int), 1, None)
+            # repeat safely
             resid = np.repeat(delta, reps)
+            resid = resid[_finite(resid)]
         else:
             resid = np.array([], dtype=float)
+    else:
+        resid = resid[_finite(resid)]
 
     hist_path = figs / "residual_hist.png"
     plt.figure()
@@ -146,10 +167,10 @@ def render_html(backtest_dir: Path, title: str = "PT-LiqAdj Backtest") -> Path:
         metrics = json.load(f)
 
     overall = metrics.get("overall", {})
-    n = overall.get("n", 0)
-    mae = float(overall.get("mae_bps", 0.0))
-    rmse = float(overall.get("rmse_bps", 0.0))
-    bias = float(overall.get("bias_bps", 0.0))
+    n = int(overall.get("n", 0) or 0)
+    mae = float(overall.get("mae_bps", 0.0) or 0.0)
+    rmse = float(overall.get("rmse_bps", 0.0) or 0.0)
+    bias = float(overall.get("bias_bps", 0.0) or 0.0)
 
     tmpl = Template("""<!doctype html>
 <html lang="en">

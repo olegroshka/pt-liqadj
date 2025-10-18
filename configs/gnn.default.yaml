@@ -1,0 +1,37 @@
+project:
+  run_id: exp_gnn
+  seed: 42
+
+paths:
+  bonds: data/raw/sim/bonds.parquet
+  trades: data/raw/sim/trades.parquet
+  graph_dir: data/graph
+  dataset_dir: data/gnn
+  models_dir: models
+  reports_dir: reports
+
+model:
+  node_id_dim: 32
+  nhead: 4
+  n_layers: 1
+  d_model: 128
+  gnn_num_hidden: 64
+  gnn_out_dim: 128
+  gnn_dropout: 0.0
+  head_hidden: 128
+  head_dropout: 0.0
+  # encoder inits that passed tests:
+  enc_beta_init: 0.8
+  enc_learnable_tau: false
+  enc_tau_init: 1.0
+  use_calibrator: false
+  use_baseline: false
+  loss_type: mse
+
+train:
+  device: auto
+  max_epochs: 50
+  patience: 5
+  lr: 3e-4
+  seed: 42
+  weight_decay: 1e-4

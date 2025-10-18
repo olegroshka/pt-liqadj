@@ -24,6 +24,17 @@ ptliq-run = "ptliq.cli.run:app"
 
 ptliq-exp = "ptliq.cli.exp_gnn_vs_baseline:app"
 
+ptliq-gnn-build-graph = "ptliq.cli.gnn_build_graph:app"
+ptliq-gnn-build-dataset = "ptliq.cli.gnn_build_dataset:app"
+ptliq-gnn-train = "ptliq.cli.gnn_train:app"
+ptliq-gnn-eval = "ptliq.cli.gnn_eval:app"
+ptliq-gnn-backtest = "ptliq.cli.gnn_backtest:app"
+ptliq-gnn-pack = "ptliq.cli.gnn_pack:app"
+ptliq-gnn-score = "ptliq.cli.gnn_score:app"
+ptliq-gnn-serve = "ptliq.cli.gnn_serve:app"
+ptliq-gnn-report = "ptliq.cli.gnn_report:app"
+
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ptliq*"]

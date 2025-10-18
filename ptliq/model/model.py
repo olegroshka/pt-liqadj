@@ -71,7 +71,18 @@ class IdCatEmbedding(nn.Module):
             flat_cat = cats[name].reshape(-1)
             pieces.append(emb(flat_cat))
         H = torch.cat(pieces, dim=-1)  # [*, out_dim]
-        return H.reshape(*node_ids.shape, -1)
+        #return H.reshape(*node_ids.shape, -1)
+        # compute the final embedding size explicitly
+        if H.ndim == 2:
+            out_dim = H.shape[-1]
+        else:
+            # fallback: id + cats dims (shouldn’t be needed if H is [*, C])
+            out_dim = self.id_emb.embedding_dim
+            for emb in self.cat_embs.values():
+                out_dim += emb.embedding_dim
+
+        # unflatten without using -1 so zero-sized shapes are OK
+        return H.view(*node_ids.shape, out_dim)
 
 
 class NumericEncoder(nn.Module):
