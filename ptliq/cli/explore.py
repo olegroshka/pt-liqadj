@@ -546,6 +546,11 @@ def app_main(
     outdir: Path = typer.Option(Path("reports/explore"), "--outdir", help="Directory to write images and reports"),
     pdf: bool = typer.Option(False, "--pdf", help="Write a single multi-page PDF report"),
     plot_outdir: Path = typer.Option(Path("reports/explore"), help="[DEPRECATED] Use --outdir instead"),
+    show_components: bool = typer.Option(False, "--show-components", help="Reconcile y_bps against components and report residuals"),
+    portfolio_splits: bool = typer.Option(False, "--portfolio-splits", help="Compare distributions for portfolio vs non-portfolio"),
+    leakage_map: bool = typer.Option(False, "--leakage-map", help="List top correlations to y_bps and tag derived fields"),
+    dv01_check: bool = typer.Option(False, "--dv01-check", help="Check DV01 arithmetic consistency"),
+    html: Optional[Path] = typer.Option(None, "--html", help="Write a simple one-page HTML summary"),
 ):
     """
     Explore a Parquet/CSV file: schema, quick stats, distributions, correlations, and optional visuals.
@@ -609,6 +614,76 @@ def app_main(
             console.print(f"  • wrote {pdf_path}")
         else:
             console.print("[yellow]PDF not written (matplotlib not available)[/yellow]")
+
+    # Optional diagnostics
+    if show_components and {"y_bps","y_h_bps","y_eps_bps","y_pi_ref_bps","y_delta_port_bps"}.issubset(df.columns):
+        console.print("\n[bold]Component reconciliation[/bold]")
+        comp = df["y_pi_ref_bps"].astype(float) + df["y_h_bps"].astype(float) + df["y_eps_bps"].astype(float) + df["y_delta_port_bps"].fillna(0.0).astype(float)
+        resid = (df["y_bps"].astype(float) - comp)
+        console.print({
+            "mean_abs": float(resid.abs().mean()),
+            "std": float(resid.std(ddof=0)),
+            "max_abs": float(resid.abs().max()),
+            "p999_abs": float(resid.abs().quantile(0.999)),
+        })
+
+    if portfolio_splits and "is_portfolio" in df.columns:
+        console.print("\n[bold]Portfolio vs Non-portfolio[/bold]")
+        for col in [c for c in ["y_bps","reported_size","vendor_liq_score"] if c in df.columns]:
+            grp = df.groupby(df["is_portfolio"].astype(bool))[col].describe()[["mean","std","50%","min","max"]]
+            console.print(f"[italic]{col}[/italic]")
+            console.print(grp)
+
+        if "y_delta_port_bps" in df.columns:
+            port = df.loc[df["is_portfolio"].astype(bool), "y_delta_port_bps"].astype(float)
+            if len(port) > 0:
+                console.print("y_delta_port_bps (portfolio only):", {
+                    "mean": float(port.mean()),
+                    "std": float(port.std(ddof=0)),
+                    "p5": float(port.quantile(0.05)),
+                    "p95": float(port.quantile(0.95)),
+                })
+
+    if leakage_map:
+        console.print("\n[bold]Leakage map[/bold]")
+        if "y_bps" in df.columns:
+            num = df.select_dtypes(include=[np.number]).copy()
+            corr = num.corr(method=corr_method)["y_bps"].sort_values(ascending=False)
+            top = corr.drop(labels=["y_bps"], errors="ignore").head(top_pairs)
+            derived = {"price","price_clean_exec","price_dirty_exec"}
+            for k, v in top.items():
+                tag = " ⚠ derived" if k in derived else ""
+                console.print(f"{k:>24s}: {v: .3f}{tag}")
+
+    if dv01_check and {"dv01_dollar","dv01_per_100","reported_size"}.issubset(df.columns):
+        console.print("\n[bold]DV01 check[/bold]")
+        calc = df["dv01_per_100"].astype(float) * (df["reported_size"].astype(float) / 100.0)
+        y = df["dv01_dollar"].astype(float)
+        resid = y - calc
+        ss_res = float((resid ** 2).sum())
+        ss_tot = float(((y - float(y.mean())) ** 2).sum())
+        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else float("nan")
+        console.print({
+            "max_abs_diff": float((resid.abs()).max()),
+            "r2": float(r2),
+        })
+
+    if html is not None:
+        try:
+            html.parent.mkdir(parents=True, exist_ok=True)
+            with open(html, "w", encoding="utf-8") as f:
+                f.write("<html><head><meta charset='utf-8'><title>Explore report</title></head><body>")
+                f.write(f"<h3>File: {path}</h3>")
+                f.write(df.describe(include='all').to_html())
+                if "y_bps" in df.columns:
+                    f.write("<h4>Top correlations to y_bps</h4>")
+                    num = df.select_dtypes(include=[np.number]).copy()
+                    corr = num.corr(method=corr_method)["y_bps"].sort_values(ascending=False)
+                    f.write(corr.to_frame(name="corr").head(25).to_html())
+                f.write("</body></html>")
+            console.print(f"\n[bold]HTML report:[/bold] wrote {html}")
+        except Exception as e:
+            console.print(f"[yellow]Failed to write HTML report: {e}[/yellow]")
 
 
 # expose Typer app

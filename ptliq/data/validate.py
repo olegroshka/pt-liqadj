@@ -309,12 +309,14 @@ def _cross_checks(bonds: pd.DataFrame, trades: pd.DataFrame) -> Dict[str, Any]:
         if multiples > 0:
             warnings.append(f"trades: sizes not multiple of 5,000: {multiples}")
 
-    # portfolio-only fields masking: y_delta_port_bps must be null for non-portfolio
+    # portfolio delta policy: non-portfolio must be 0.0; no nulls anywhere
     if {"is_portfolio","y_delta_port_bps"}.issubset(trades.columns):
-        bad_mask = trades.loc[~trades["is_portfolio"].astype(bool) & trades["y_delta_port_bps"].notna()]
-        n_bad_mask = int(len(bad_mask))
-        if n_bad_mask > 0:
-            errors.append(f"trades: y_delta_port_bps must be null on non-portfolio rows: {n_bad_mask}")
+        nulls = int(trades["y_delta_port_bps"].isna().sum())
+        if nulls > 0:
+            errors.append(f"trades: y_delta_port_bps has nulls: {nulls}")
+        non_port_bad = int((~trades["is_portfolio"].astype(bool) & (trades["y_delta_port_bps"].astype(float) != 0.0)).sum())
+        if non_port_bad > 0:
+            errors.append(f"trades: non-portfolio rows must have y_delta_port_bps == 0.0: {non_port_bad}")
 
     # leakage detector on numeric columns vs key targets
     leakage_diag: Dict[str, Dict[str, float]] = {}

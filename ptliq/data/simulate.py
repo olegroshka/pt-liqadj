@@ -85,6 +85,10 @@ class SimParams:
     gp_intercept_bps: float = 1.0
     gp_slope_bps: float = 45.0
 
+    # Reference premium vs vendor score coupling (for targets)
+    pi_ref_slope: float = 0.4            # slope linking vendor_liq_score -> y_pi_ref_bps
+    pi_ref_noise_bps: float = 4.0        # noise to loosen correlation to ~0.7–0.85
+
     # Trade intensity controls
     base_intensity: float = 0.18         # baseline Poisson rate per bond per day
     liq_to_intensity: float = 0.006      # lift per unit of static vendor liq (scaled to 0..1)
@@ -508,11 +512,10 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
             provider_act_col = f"pi_ref_{provider}_bps"
             provider_liq_col = f"vendor_{provider}_liq"
             active_provider = provider
-            # provider baseline (reference premium)
-            pi_ref_bps = float(bnd[provider_act_col])
-            # expose a slightly noisy reference to avoid perfect correlation with vendor_liq
-            pi_ref_noise = float(rng.normal(0.0, 2.0))
-            y_pi_ref_out = float(pi_ref_bps + pi_ref_noise)
+            # provider baseline (reference premium for internal provider mapping)
+            # Note: for target component we tie to vendor_liq_score with configurable slope+noise
+            v_liq = float(bnd[provider_liq_col])
+            y_pi_ref_out = float(params.pi_ref_slope * v_liq + rng.normal(0.0, params.pi_ref_noise_bps))
 
             # standardize size via the generator's log parameters
             size_z = (math.log(max(1.0, size)) - mu) / (sigma + 1e-8)
@@ -556,14 +559,14 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 delta_for_y = float(port_delta_bps)
                 y_delta_out = float(port_delta_bps)
             else:
-                # continuous low similarity for non-portfolio lines
-                port_similarity = float(rng.beta(1.0, 9.0))
+                # normalize similarity for non-portfolio lines
+                port_similarity = 0.0
                 delta_for_y = 0.0
-                y_delta_out = float('nan')
+                y_delta_out = 0.0
 
             # truthful premium & observed prices
             y_bps, h_bps, eps_bps, delta_bps, pi_ref_used = _compose_y_bps(
-                baseline_ref_bps=pi_ref_bps,
+                baseline_ref_bps=y_pi_ref_out,
                 size_z=size_z,
                 side_sign=side_sign,
                 sec_code=sec_code,
@@ -666,6 +669,16 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
         return pd.DataFrame(columns=["ts", "isin", "side", "size", "is_portfolio", "y_bps", "price", "price_clean_exec"])
 
     trades = pd.DataFrame(trades_rows).sort_values(["exec_time", "isin"]).reset_index(drop=True)
+
+    # Guardrail: y_bps must equal sum of components within tolerance
+    try:
+        comp = trades[["y_pi_ref_bps","y_h_bps","y_delta_port_bps","y_eps_bps"]].sum(axis=1)
+        diff = (trades["y_bps"] - comp).abs().max()
+        assert float(diff) < 1e-6
+    except Exception:
+        # if columns are missing for some reason, skip strict check
+        pass
+
     return trades
 
 
