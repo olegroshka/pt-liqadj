@@ -109,8 +109,12 @@ def _histogram(series: pd.Series, bins: int = 20):
     if s.empty:
         return None
     if pd.api.types.is_datetime64_any_dtype(s):
-        # convert to int for binning (nanoseconds)
-        s = s.view(np.int64)
+        # convert to int for binning (nanoseconds) using astype (view is deprecated)
+        s = s.astype('int64')
+    if pd.api.types.is_bool_dtype(s):
+        # Bin booleans explicitly to avoid bool→uint8 histogram warnings
+        counts, edges = np.histogram(s.astype(int), bins=[-0.5, 0.5, 1.5])
+        return counts, np.array([-0.5, 0.5, 1.5])
     counts, edges = np.histogram(s, bins=bins)
     return counts, edges
 
@@ -195,22 +199,22 @@ def _save_plots(
         except Exception:
             sns = None  # type: ignore
         from matplotlib import gridspec  # type: ignore
+        import math as _m
     except Exception as e:
         print("[yellow]matplotlib not installed; skipping plots. Install with: pip install matplotlib seaborn[/yellow]")
         return written
 
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # Identify numeric columns once
-    num_cols = [
-        c for c in df.columns
-        if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])
-    ]
+    # Identify columns
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])]
+    dt_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+    bool_cols = [c for c in df.columns if pd.api.types.is_bool_dtype(df[c])]
 
-    # 1) Save individual files to disk (without leaving multiple figure windows open)
+    # 1) Save correlation heatmap
     heat_path = None
     if len(num_cols) >= 2:
-        corr = df[num_cols].corr()
+        corr = df[num_cols].corr(numeric_only=True)
         fig_h = plt.figure(figsize=(max(6, len(num_cols) * 0.6), max(5, len(num_cols) * 0.6)))
         ax_h = fig_h.add_subplot(111)
         if 'sns' in locals() and sns is not None:
@@ -226,41 +230,106 @@ def _save_plots(
         heat_name = (f"{plot_prefix}__correlation_heatmap.png" if plot_prefix else "correlation_heatmap.png")
         heat_path = outdir / heat_name
         fig_h.tight_layout()
-        fig_h.savefig(heat_path)
+        fig_h.savefig(heat_path, dpi=200)
         plt.close(fig_h)
         written.append(heat_path)
 
+    # 2) Individual numeric histograms
     hist_series = []  # collect for composite figure
     for c in num_cols[:max_hists]:
         s = df[c].dropna()
         if s.empty:
             continue
-        # Save individual histogram file
         fig_i = plt.figure(figsize=(5, 3))
         ax_i = fig_i.add_subplot(111)
-        ax_i.hist(s, bins=bins, color="#4C78A8", edgecolor="white")
+        ax_i.hist(s.values.astype(float), bins=bins, color="#4C78A8", edgecolor="white")
         ax_i.set_title(f"Histogram: {c}")
         ax_i.set_xlabel(c)
         ax_i.set_ylabel("count")
         hist_name = (f"{plot_prefix}__hist_{c}.png" if plot_prefix else f"hist_{c}.png")
         path = outdir / hist_name
         fig_i.tight_layout()
-        fig_i.savefig(path)
+        fig_i.savefig(path, dpi=160)
         plt.close(fig_i)
         written.append(path)
-        # store for composite display
         hist_series.append((c, s))
 
-    # 2) Show a single consolidated window with all plots arranged in a scroll-friendly tall figure
+    # 3) Overview figure: heatmap + auto-selected histograms (numeric + datetime + bool)
+    to_plot_cols = num_cols[:6] + dt_cols[:2] + bool_cols[:2]
+    if len(to_plot_cols) > 0:
+        # rows: 1 for heatmap + ceil(n_hist/3)
+        n_hist = len(to_plot_cols)
+        rows_hists = _m.ceil(n_hist / 3)
+        rows_total = 1 + rows_hists
+        fig = plt.figure(figsize=(10, 3.2 * rows_total))
+        gs = fig.add_gridspec(nrows=rows_total, ncols=3)
+
+        # Heatmap on top
+        ax0 = fig.add_subplot(gs[0, :])
+        if len(num_cols) >= 2:
+            corr2 = df[num_cols].corr(numeric_only=True)
+            if 'sns' in locals() and sns is not None:
+                sns.heatmap(corr2, ax=ax0, cmap="coolwarm", center=0, cbar=True)
+            else:
+                im = ax0.imshow(corr2.values, cmap="coolwarm", vmin=-1, vmax=1)
+                fig.colorbar(im, ax=ax0)
+                ax0.set_xticks(range(len(corr2.columns)))
+                ax0.set_xticklabels(corr2.columns, rotation=90, fontsize=8)
+                ax0.set_yticks(range(len(corr2.columns)))
+                ax0.set_yticklabels(corr2.columns, fontsize=8)
+            ax0.set_title("Correlation heatmap")
+        else:
+            ax0.axis("off")
+            ax0.set_title("Correlation heatmap (insufficient numeric cols)")
+
+        # Histograms
+        cell_idx = 0
+        for cname in to_plot_cols:
+            r = 1 + (cell_idx // 3)
+            cidx = cell_idx % 3
+            ax = fig.add_subplot(gs[r, cidx])
+            s = df[cname].dropna()
+            if pd.api.types.is_datetime64_any_dtype(s):
+                s_i = s.astype("int64")
+                counts, edges = np.histogram(s_i, bins=bins)
+                ax.bar(edges[:-1], counts, width=np.diff(edges), align="edge")
+                ax.set_xlabel(cname)
+                ax.set_ylabel("count")
+                ax.set_title(f"Histogram: {cname}")
+            elif pd.api.types.is_bool_dtype(s):
+                counts, edges = np.histogram(s.astype(int), bins=[-0.5, 0.5, 1.5])
+                ax.bar([0, 1], counts, align="center")
+                ax.set_xticks([0, 1])
+                ax.set_xticklabels(["False", "True"])
+                ax.set_ylabel("count")
+                ax.set_title(f"Histogram: {cname}")
+            elif pd.api.types.is_numeric_dtype(s):
+                ax.hist(s.values.astype(float), bins=bins)
+                ax.set_xlabel(cname)
+                ax.set_ylabel("count")
+                ax.set_title(f"Histogram: {cname}")
+            else:
+                vc = s.astype(str).value_counts().head(20)
+                ax.bar(vc.index, vc.values)
+                ax.tick_params(axis="x", rotation=90, labelsize=7)
+                ax.set_title(f"Freq: {cname}")
+            cell_idx += 1
+
+        fig.tight_layout()
+        overview_name = (f"{plot_prefix}__overview.png" if plot_prefix else "overview.png")
+        overview_path = outdir / overview_name
+        fig.savefig(overview_path, dpi=200)
+        plt.close(fig)
+        written.append(overview_path)
+
+    # 4) Optional consolidated window
     if show:
         try:
             n_h = len(hist_series)
             has_heat = heat_path is not None
-            # layout: heatmap on top (optional) + grid of histograms below (3 per row)
             cols = 3 if n_h >= 3 else max(1, n_h)
             rows_hists = (n_h + cols - 1) // cols if n_h > 0 else 0
             rows_total = rows_hists + (1 if has_heat else 0)
-            # Figure height scales with number of rows to allow scrolling in interactive backends
             fig_height = 3.0 * rows_total + (2.0 if has_heat else 0.0)
             fig = plt.figure(figsize=(max(9, cols * 4), max(6, fig_height)))
             gs = gridspec.GridSpec(rows_total, cols, height_ratios=[2.0] + [1.0] * rows_hists if has_heat else [1.0] * rows_hists)
@@ -268,7 +337,6 @@ def _save_plots(
             idx_row = 0
             if has_heat:
                 ax = fig.add_subplot(gs[0, :])
-                # Recompute corr to draw into this figure to avoid reading from file
                 corr2 = df[num_cols].corr() if len(num_cols) >= 2 else None
                 if corr2 is not None:
                     if 'sns' in locals() and sns is not None:
@@ -305,9 +373,168 @@ def _save_plots(
     return written
 
 
+def _write_pdf(df: pd.DataFrame, outdir: Path, stem: str, bins: int = 20) -> Path | None:
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+        from matplotlib.backends.backend_pdf import PdfPages  # type: ignore
+        try:
+            import seaborn as sns  # type: ignore
+        except Exception:
+            sns = None  # type: ignore
+    except Exception:
+        print("[yellow]matplotlib not installed; skipping --pdf. Install with: pip install matplotlib seaborn[/yellow]")
+        return None
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    pdf_path = outdir / f"{stem}__report.pdf"
+
+    # Helper to add a text page
+    def add_text_page(title: str, lines: list[str]):
+        fig, ax = plt.subplots(figsize=(8.5, 11))
+        ax.axis("off")
+        txt = [f"{title}", ""] + lines
+        ax.text(0.02, 0.98, "\n".join(txt), va="top", family="monospace", fontsize=9)
+        pdf_out.savefig(fig)
+        plt.close(fig)
+
+    # Column groups
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])]
+    dt_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+    bool_cols = [c for c in df.columns if pd.api.types.is_bool_dtype(df[c])]
+
+    with PdfPages(pdf_path) as pdf_out:
+        # Cover / overview page with guidance
+        lines = [
+            f"Rows: {len(df):,} | Columns: {df.shape[1]}",
+            "",
+            "This report summarizes the dataset with schema, stats, correlations, and distributions.",
+            "Use it to spot data issues:",
+            "- Missing data: high null counts, empty histograms, or spikes at special values.",
+            "- Outliers: very wide ranges or long tails in histograms.",
+            "- Duplicates / low cardinality: tiny 'unique' vs rows for categorical columns.",
+            "- Leakage / redundancy: very high correlations (|r| ≈ 1).",
+        ]
+        add_text_page("Data exploration report", lines)
+
+        # Schema page with description
+        schema_lines = [
+            "Schema: column, dtype, non-null count, and unique values.",
+            "Watch for: unexpected dtypes, many nulls, extremely low or high cardinality.",
+            "",
+        ]
+        for c in df.columns:
+            s = df[c]
+            schema_lines.append(f"• {c:24s}  {str(s.dtype):12s}  non-null={s.notna().sum():,}  nulls={s.isna().sum():,}  unique={s.nunique(dropna=True):,}")
+        add_text_page("Schema", schema_lines)
+
+        # Numeric stats with description
+        if num_cols:
+            desc = df[num_cols].describe(percentiles=[0.5]).T.rename(columns={"50%": "p50"})
+            lines = [
+                "Numeric stats: count, mean, std, min, p50, max for numeric columns.",
+                "Watch for: zero std (constant columns), huge ranges, NaNs in count.",
+                "",
+            ]
+            for c, row in desc.iterrows():
+                lines.append(f"• {c:24s}  n={int(row['count']):8d}  mean={row['mean']:.4g}  std={row['std']:.4g}  min={row['min']:.4g}  p50={row['p50']:.4g}  max={row['max']:.4g}")
+            add_text_page("Numeric stats", lines)
+
+        # Correlation heatmap page with description
+        if len(num_cols) >= 2:
+            corr = df[num_cols].corr(numeric_only=True)
+            fig, ax = plt.subplots(figsize=(8.5, 7))
+            if sns is not None:
+                sns.heatmap(corr, ax=ax, cmap="coolwarm", center=0, cbar=True)
+            else:
+                im = ax.imshow(corr.values, cmap="coolwarm", vmin=-1, vmax=1)
+                fig.colorbar(im, ax=ax)
+                ax.set_xticks(range(len(corr.columns)))
+                ax.set_xticklabels(corr.columns, rotation=90, fontsize=7)
+                ax.set_yticks(range(len(corr.columns)))
+                ax.set_yticklabels(corr.columns, fontsize=7)
+            ax.set_title("Correlation heatmap — strong |r| may indicate redundancy or leakage")
+            fig.tight_layout()
+            pdf_out.savefig(fig)
+            plt.close(fig)
+
+            # Top pairs table as text page
+            iu = np.triu_indices_from(corr, k=1)
+            pairs = (
+                pd.DataFrame({
+                    "col_A": corr.columns.values.repeat(len(corr)),
+                    "col_B": np.tile(corr.columns, len(corr)),
+                    "corr": corr.values.flatten(),
+                })
+                .loc[lambda x: x.index.isin([i * len(corr) + j for i, j in zip(*iu)])]
+                .assign(corr=lambda x: x["corr"].round(3))
+                .sort_values("corr", key=lambda s: s.abs(), ascending=False)
+                .head(12)
+            )
+            lines = ["Top correlation pairs (Pearson). Watch for values near ±1.", ""]
+            for _, r in pairs.iterrows():
+                lines.append(f"• {r['col_A']} ↔ {r['col_B']}: corr={r['corr']:+.3f}")
+            add_text_page("Top correlations", lines)
+
+        # Distribution pages with per-plot descriptions
+        # Numeric
+        for c in num_cols:
+            s = df[c].dropna().astype(float)
+            fig, ax = plt.subplots(figsize=(8.5, 4))
+            ax.hist(s.values, bins=bins)
+            ax.set_title(f"Histogram: {c}")
+            ax.set_xlabel(c)
+            ax.set_ylabel("count")
+            fig.tight_layout()
+            pdf_out.savefig(fig)
+            plt.close(fig)
+            # caption
+            cap = [
+                f"Histogram of {c}.",
+                "Look for: skewness, long tails (outliers), spikes at sentinels, and empty bins indicating gaps.",
+            ]
+            add_text_page(f"About: {c}", cap)
+
+        # Datetime
+        for c in dt_cols:
+            s = df[c].dropna().astype("int64")
+            counts, edges = np.histogram(s, bins=bins)
+            fig, ax = plt.subplots(figsize=(8.5, 4))
+            ax.bar(edges[:-1], counts, width=np.diff(edges), align="edge")
+            ax.set_title(f"Histogram: {c}")
+            ax.set_xlabel(c)
+            ax.set_ylabel("count")
+            fig.tight_layout()
+            pdf_out.savefig(fig)
+            plt.close(fig)
+            add_text_page(f"About: {c}", [
+                f"Time distribution for {c}.",
+                "Look for: unexpected inactive periods, clustering at single timestamps, or timezone artifacts.",
+            ])
+
+        # Bool
+        for c in bool_cols:
+            s = df[c].dropna().astype(int)
+            counts, _ = np.histogram(s, bins=[-0.5, 0.5, 1.5])
+            fig, ax = plt.subplots(figsize=(8.5, 3))
+            ax.bar([0, 1], counts, align="center")
+            ax.set_xticks([0, 1])
+            ax.set_xticklabels(["False", "True"])
+            ax.set_title(f"Histogram: {c}")
+            ax.set_ylabel("count")
+            fig.tight_layout()
+            pdf_out.savefig(fig)
+            plt.close(fig)
+            add_text_page(f"About: {c}", [
+                f"Boolean distribution for {c}.",
+                "Look for: extremely imbalanced classes which may harm model learning or indicate flags that are almost constant.",
+            ])
+
+    return pdf_path
+
+
 @app.command()
 def app_main(
-    path: Path = typer.Argument(..., help="Path to a parquet file"),
+    path: Path = typer.Argument(..., help="Path to a parquet or CSV file"),
     columns: Optional[str] = typer.Option(None, help="Comma-separated list of columns to include"),
     preview_rows: int = typer.Option(5, help="Show first N rows preview (0 to skip)"),
     topk: int = typer.Option(10, help="Top-K values for categorical distributions"),
@@ -316,19 +543,33 @@ def app_main(
     corr_method: str = typer.Option("pearson", help="Correlation method: pearson|spearman|kendall"),
     top_pairs: int = typer.Option(10, help="How many correlated pairs to display"),
     plots: bool = typer.Option(False, help="Generate visualization PNGs and open a single consolidated window (off by default)"),
-    plot_outdir: Path = typer.Option(Path("reports/explore"), help="Directory to write plots when --plots is used"),
+    outdir: Path = typer.Option(Path("reports/explore"), "--outdir", help="Directory to write images and reports"),
+    pdf: bool = typer.Option(False, "--pdf", help="Write a single multi-page PDF report"),
+    plot_outdir: Path = typer.Option(Path("reports/explore"), help="[DEPRECATED] Use --outdir instead"),
 ):
     """
-    Explore a parquet file: print schema, quick stats, distributions, and correlations. Optional plots can be saved to disk.
+    Explore a Parquet/CSV file: schema, quick stats, distributions, correlations, and optional visuals.
     """
     console = Console()
     if not path.exists():
         raise typer.BadParameter(f"File not found: {path}")
 
+    # Support CSV as well, reusing loader fallback if present
     cols = None
     if columns:
         cols = [c.strip() for c in columns.split(",") if c.strip()]
-    df = _load_parquet(path, cols)
+    # Try to read parquet first; if fails, try CSV
+    try:
+        df = _load_parquet(path, cols)
+    except Exception:
+        if path.suffix.lower() == ".csv":
+            df = pd.read_csv(path, usecols=cols if cols else None)
+        else:
+            # fallback to pandas auto CSV
+            try:
+                df = pd.read_csv(path, usecols=cols if cols else None)
+            except Exception as e:
+                raise e
 
     print(f"[bold]File:[/bold] {path} | rows={len(df):,} cols={len(df.columns)}")
     _print_schema(df, console)
@@ -347,15 +588,27 @@ def app_main(
         console.print("\n[bold]Correlations[/bold]")
         _print_correlations(df, console, method=corr_method, top_pairs=top_pairs)
 
+    # Resolve output directory, preferring --outdir over deprecated --plot_outdir
+    outdir = outdir or plot_outdir
+    outdir.mkdir(parents=True, exist_ok=True)
+
     if plots:
         console.print("\n[bold]Generating plots[/bold]")
         prefix = path.stem
-        written = _save_plots(df, plot_outdir, bins=bins, plot_prefix=prefix, show=True)
+        written = _save_plots(df, outdir, bins=bins, plot_prefix=prefix, show=True)
         if written:
             for p in written:
                 console.print(f"  • wrote {p}")
         else:
             console.print("[yellow]No plots written[/yellow]")
+
+    if pdf:
+        console.print("\n[bold]Writing PDF report[/bold]")
+        pdf_path = _write_pdf(df, outdir, path.stem, bins=bins)
+        if pdf_path is not None:
+            console.print(f"  • wrote {pdf_path}")
+        else:
+            console.print("[yellow]PDF not written (matplotlib not available)[/yellow]")
 
 
 # expose Typer app
