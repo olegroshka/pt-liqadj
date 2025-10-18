@@ -194,58 +194,108 @@ def _save_plots(
             import seaborn as sns  # type: ignore
         except Exception:
             sns = None  # type: ignore
+        from matplotlib import gridspec  # type: ignore
     except Exception as e:
         print("[yellow]matplotlib not installed; skipping plots. Install with: pip install matplotlib seaborn[/yellow]")
         return written
 
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # Correlation heatmap
+    # Identify numeric columns once
     num_cols = [
         c for c in df.columns
         if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])
     ]
+
+    # 1) Save individual files to disk (without leaving multiple figure windows open)
+    heat_path = None
     if len(num_cols) >= 2:
         corr = df[num_cols].corr()
-        plt.figure(figsize=(max(6, len(num_cols) * 0.6), max(5, len(num_cols) * 0.6)))
+        fig_h = plt.figure(figsize=(max(6, len(num_cols) * 0.6), max(5, len(num_cols) * 0.6)))
+        ax_h = fig_h.add_subplot(111)
         if 'sns' in locals() and sns is not None:
-            sns.heatmap(corr, annot=False, cmap="vlag", center=0.0)
+            sns.heatmap(corr, annot=False, cmap="vlag", center=0.0, ax=ax_h)
         else:
-            # Fallback to a Matplotlib-native diverging colormap to avoid errors on environments
-            # without Seaborn (Matplotlib does not know 'vlag').
-            plt.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
-            plt.colorbar()
-            plt.xticks(range(len(num_cols)), num_cols, rotation=90)
-            plt.yticks(range(len(num_cols)), num_cols)
-        plt.title("Correlation heatmap")
+            im = ax_h.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
+            fig_h.colorbar(im, ax=ax_h)
+            ax_h.set_xticks(range(len(num_cols)))
+            ax_h.set_yticks(range(len(num_cols)))
+            ax_h.set_xticklabels(num_cols, rotation=90)
+            ax_h.set_yticklabels(num_cols)
+        ax_h.set_title("Correlation heatmap")
         heat_name = (f"{plot_prefix}__correlation_heatmap.png" if plot_prefix else "correlation_heatmap.png")
         heat_path = outdir / heat_name
-        plt.tight_layout()
-        plt.savefig(heat_path)
+        fig_h.tight_layout()
+        fig_h.savefig(heat_path)
+        plt.close(fig_h)
         written.append(heat_path)
 
-    # Numeric histograms (cap to first N)
+    hist_series = []  # collect for composite figure
     for c in num_cols[:max_hists]:
         s = df[c].dropna()
         if s.empty:
             continue
-        plt.figure(figsize=(5, 3))
-        plt.hist(s, bins=bins, color="#4C78A8", edgecolor="white")
-        plt.title(f"Histogram: {c}")
-        plt.xlabel(c)
-        plt.ylabel("count")
+        # Save individual histogram file
+        fig_i = plt.figure(figsize=(5, 3))
+        ax_i = fig_i.add_subplot(111)
+        ax_i.hist(s, bins=bins, color="#4C78A8", edgecolor="white")
+        ax_i.set_title(f"Histogram: {c}")
+        ax_i.set_xlabel(c)
+        ax_i.set_ylabel("count")
         hist_name = (f"{plot_prefix}__hist_{c}.png" if plot_prefix else f"hist_{c}.png")
         path = outdir / hist_name
-        plt.tight_layout()
-        plt.savefig(path)
+        fig_i.tight_layout()
+        fig_i.savefig(path)
+        plt.close(fig_i)
         written.append(path)
+        # store for composite display
+        hist_series.append((c, s))
 
-    # Best-effort: open figures in a window for the user
+    # 2) Show a single consolidated window with all plots arranged in a scroll-friendly tall figure
     if show:
         try:
+            n_h = len(hist_series)
+            has_heat = heat_path is not None
+            # layout: heatmap on top (optional) + grid of histograms below (3 per row)
+            cols = 3 if n_h >= 3 else max(1, n_h)
+            rows_hists = (n_h + cols - 1) // cols if n_h > 0 else 0
+            rows_total = rows_hists + (1 if has_heat else 0)
+            # Figure height scales with number of rows to allow scrolling in interactive backends
+            fig_height = 3.0 * rows_total + (2.0 if has_heat else 0.0)
+            fig = plt.figure(figsize=(max(9, cols * 4), max(6, fig_height)))
+            gs = gridspec.GridSpec(rows_total, cols, height_ratios=[2.0] + [1.0] * rows_hists if has_heat else [1.0] * rows_hists)
+
+            idx_row = 0
+            if has_heat:
+                ax = fig.add_subplot(gs[0, :])
+                # Recompute corr to draw into this figure to avoid reading from file
+                corr2 = df[num_cols].corr() if len(num_cols) >= 2 else None
+                if corr2 is not None:
+                    if 'sns' in locals() and sns is not None:
+                        sns.heatmap(corr2, annot=False, cmap="vlag", center=0.0, ax=ax)
+                    else:
+                        im = ax.imshow(corr2, cmap="RdBu_r", vmin=-1, vmax=1)
+                        fig.colorbar(im, ax=ax)
+                        ax.set_xticks(range(len(num_cols)))
+                        ax.set_yticks(range(len(num_cols)))
+                        ax.set_xticklabels(num_cols, rotation=90)
+                        ax.set_yticklabels(num_cols)
+                    ax.set_title("Correlation heatmap")
+                idx_row = 1
+
+            for i, (cname, sdata) in enumerate(hist_series):
+                r = idx_row + (i // cols)
+                col = i % cols
+                ax = fig.add_subplot(gs[r, col])
+                ax.hist(sdata, bins=bins, color="#4C78A8", edgecolor="white")
+                ax.set_title(f"Hist: {cname}")
+                ax.set_xlabel(cname)
+                ax.set_ylabel("count")
+
+            fig.tight_layout()
             plt.show()
         except Exception:
-            print("[yellow]Could not open plot windows (headless environment?). Files were saved to disk.[/yellow]")
+            print("[yellow]Could not open plot window (headless environment?). Files were saved to disk.[/yellow]")
         finally:
             try:
                 plt.close('all')
@@ -265,7 +315,7 @@ def app_main(
     correlations: bool = typer.Option(True, help="Show top correlated pairs for numeric columns"),
     corr_method: str = typer.Option("pearson", help="Correlation method: pearson|spearman|kendall"),
     top_pairs: int = typer.Option(10, help="How many correlated pairs to display"),
-    plots: bool = typer.Option(False, help="Generate visualization PNGs (off by default)"),
+    plots: bool = typer.Option(False, help="Generate visualization PNGs and open a single consolidated window (off by default)"),
     plot_outdir: Path = typer.Option(Path("reports/explore"), help="Directory to write plots when --plots is used"),
 ):
     """
