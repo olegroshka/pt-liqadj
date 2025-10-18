@@ -17,14 +17,14 @@ data:
     providers: [ "P1" ]
     seed: 42
 
-    # Reference price controls
+    # Pricing / reference price
     par: 100.0
     base_spread_bps: 0.0
     sector_spread_bps: 3.0
     rating_spread_bps: 5.0
     clean_price_noise_bps: 2.0
 
-    # Liquidity premium generator (target)
+    # Liquidity premium generator (y_bps)
     liq_size_coeff: 8.0
     liq_side_coeff: 12.0
     liq_sector_coeff: 2.0
@@ -32,20 +32,27 @@ data:
     liq_eps_bps: 3.0
     micro_price_noise_bps: 1.0
 
-    # TRACE/market behavior
-    ats_share: 0.08
-    late_share: 0.02
-    asof_share: 0.012
-    cancel_share: 0.004
+    # Provider coupling for y_pi_ref_bps
+    pi_ref_slope: 0.4
+    pi_ref_noise_bps: 4.0
+
+    # TRACE/market behavior (event rates)
+    ats_rate: 0.08
+    late_rate: 0.02
+    asof_rate: 0.012
+    cancel_rate: 0.004
 
     # Portfolio behavior
-    portfolio_share: 0.17
-    portfolio_patterns: [ "balanced", "sector_crowding", "issuer_crowding", "curve_imbalance" ]
-    portfolio_pattern_probs: [ 0.4, 0.25, 0.2, 0.15 ]
+    portfolio_trade_share: 0.17
+    basket_size_min: 10
+    basket_size_max: 35
+    port_skew_mu: 0.75
+    port_skew_sigma: 0.35
+    port_time_spread_sec: 2
 
     # TRACE size caps
-    hy_cap: 1000000.0
-    ig_cap: 5000000.0
+    cap_hy: 1000000.0
+    cap_ig: 5000000.0
 
     # Output
     outdir: "data/raw/sim"

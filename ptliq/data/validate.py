@@ -141,8 +141,27 @@ def _check_table(path: Path, spec: TableSpec) -> Dict[str, Any]:
     const_cols = _constant_like_columns(df, threshold=0.95)
     near_dupes = _near_duplicate_numeric(df, tol=1e-12)
 
+    # Allow-list adjustments for trades table
+    expected_missing_notes: List[str] = []
+    if spec.name == "trades":
+        # Suppress low-variation warnings for expected near-constants
+        low_var_allow = {"is_late","is_asof","is_cancel","sale_condition3","asof_indicator","active_provider"}
+        const_cols = [c for c in const_cols if c not in low_var_allow]
+        # Reclassify portfolio_id missingness as expected when is_portfolio == False
+        if "portfolio_id" in df.columns and "is_portfolio" in df.columns:
+            is_port = df["is_portfolio"].astype(bool)
+            missing_mask = df["portfolio_id"].isna()
+            missing_on_non_port = bool((missing_mask & ~is_port).all()) if len(df) > 0 else False
+            missing_on_port = int((missing_mask & is_port).sum())
+            if missing_on_non_port and missing_on_port == 0:
+                # Remove from high-missing list later and record note
+                expected_missing_notes.append("portfolio_id missing on non-portfolio rows (expected)")
+
     # warn on high missingness and constancy
     high_missing = [c for c, p in miss.items() if p > 0.02]
+    # Remove portfolio_id from high-missing if expected
+    if spec.name == "trades" and "portfolio_id" in high_missing and expected_missing_notes:
+        high_missing = [c for c in high_missing if c != "portfolio_id"]
     if high_missing:
         warnings.append(f"high-missingness cols (>2%): {high_missing[:10]}")
     if const_cols:

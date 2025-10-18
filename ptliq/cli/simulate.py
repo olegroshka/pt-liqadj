@@ -150,9 +150,12 @@ def main(
 
     frames = simulate(params)
 
+    # Drop compatibility alias to avoid duplicate numeric columns on disk
+    trades_out = frames["trades"].drop(columns=["price_clean_exec"], errors="ignore")
+
     paths = {
         "bonds": write_parquet(frames["bonds"], Path(outdir) / "bonds.parquet"),
-        "trades": write_parquet(frames["trades"], Path(outdir) / "trades.parquet"),
+        "trades": write_parquet(trades_out, Path(outdir) / "trades.parquet"),
     }
     print(f"[bold green]Done.[/bold green] Wrote:")
     for k, p in paths.items():

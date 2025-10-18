@@ -475,6 +475,107 @@ def _write_pdf(df: pd.DataFrame, outdir: Path, stem: str, bins: int = 20) -> Pat
                 lines.append(f"• {r['col_A']} ↔ {r['col_B']}: corr={r['corr']:+.3f}")
             add_text_page("Top correlations", lines)
 
+        # Expectations traffic-light summary (inline defaults)
+        expectations = {
+            "price": {"min": 99.2, "max": 100.3},
+            "clean_price": {"min": 99.58, "max": 100.04},
+            "y_bps": {"min": -60, "max": 60},
+            "y_h_bps": {"min": -60, "max": 60},
+            "y_pi_ref_bps": {"min": -12, "max": 36},
+            "accrued_interest": {"min": 0.0, "max": 6.2},
+            "dv01_per_100": {"min": 0.002, "max": 0.105},
+            "vendor_liq_score": {"min": 0.5, "max": 60},
+        }
+        rows = ["column          observed_min   observed_max   status"]
+        for k, band in expectations.items():
+            if k in df.columns:
+                s = df[k].astype(float)
+                obs_min = float(s.min()) if len(s) > 0 else float("nan")
+                obs_max = float(s.max()) if len(s) > 0 else float("nan")
+                ok = (obs_min >= band["min"]) and (obs_max <= band["max"]) if np.isfinite(obs_min) and np.isfinite(obs_max) else False
+                status = "OK" if ok else ("WARN" if np.isfinite(obs_min) and np.isfinite(obs_max) else "N/A")
+                rows.append(f"• {k:16s} {obs_min:12.3f}   {obs_max:12.3f}   {status}")
+        add_text_page("Top checks — expected vs observed", rows)
+
+        # Daily medians strip (market sanity)
+        if "trade_dt" in df.columns:
+            try:
+                dfd = df.copy()
+                dfd["trade_dt"] = pd.to_datetime(dfd["trade_dt"]).dt.date
+                cols = [c for c in ["price","clean_price","y_bps"] if c in dfd.columns]
+                if cols:
+                    med = dfd.groupby("trade_dt")[cols].median()
+                    fig, ax1 = plt.subplots(figsize=(8.5, 3.5))
+                    ax2 = ax1.twinx() if "y_bps" in cols else None
+                    if "price" in med.columns:
+                        ax1.plot(med.index, med["price"], label="price", color="#4C78A8")
+                    if "clean_price" in med.columns:
+                        ax1.plot(med.index, med["clean_price"], label="clean_price", color="#72B7B2")
+                    if "y_bps" in med.columns and ax2 is not None:
+                        ax2.plot(med.index, med["y_bps"], label="y_bps", color="#F58518")
+                        ax2.set_ylabel("y_bps (right)")
+                    ax1.set_title("Daily medians: price/clean_price (left), y_bps (right)")
+                    ax1.set_xlabel("trade_dt")
+                    ax1.legend(loc="upper left")
+                    fig.autofmt_xdate(rotation=45)
+                    fig.tight_layout()
+                    pdf_out.savefig(fig)
+                    plt.close(fig)
+            except Exception:
+                pass
+
+        # Portfolio-only correlations
+        if "is_portfolio" in df.columns:
+            try:
+                sub = df.loc[df["is_portfolio"].astype(bool)].copy()
+                nump = sub.select_dtypes(include=[np.number])
+                if nump.shape[1] >= 2 and len(sub) > 0:
+                    corrp = nump.corr(numeric_only=True)
+                    fig, ax = plt.subplots(figsize=(8.0, 6.5))
+                    if sns is not None:
+                        sns.heatmap(corrp, ax=ax, cmap="coolwarm", center=0, cbar=True)
+                    else:
+                        im = ax.imshow(corrp.values, cmap="coolwarm", vmin=-1, vmax=1)
+                        fig.colorbar(im, ax=ax)
+                        ax.set_xticks(range(len(corrp.columns)))
+                        ax.set_xticklabels(corrp.columns, rotation=90, fontsize=7)
+                        ax.set_yticks(range(len(corrp.columns)))
+                        ax.set_yticklabels(corrp.columns, fontsize=7)
+                    ax.set_title("Correlation heatmap — portfolio-only")
+                    fig.tight_layout()
+                    pdf_out.savefig(fig)
+                    plt.close(fig)
+            except Exception:
+                pass
+
+        # Per-sector and per-rating boxplots for y_bps
+        if "y_bps" in df.columns and ("sector" in df.columns or "rating" in df.columns):
+            try:
+                if "sector" in df.columns:
+                    fig, ax = plt.subplots(figsize=(8.5, 3.5))
+                    data = [df.loc[df["sector"] == s, "y_bps"].astype(float).dropna().values for s in sorted(df["sector"].dropna().unique())]
+                    labels = sorted(df["sector"].dropna().unique())
+                    ax.boxplot(data, labels=labels, showfliers=False)
+                    ax.set_title("y_bps by sector")
+                    ax.set_ylabel("bps")
+                    fig.tight_layout()
+                    pdf_out.savefig(fig)
+                    plt.close(fig)
+                if "rating" in df.columns:
+                    fig, ax = plt.subplots(figsize=(8.5, 3.5))
+                    # preserve rating order if possible
+                    order = [r for r in ["AAA","AA","A","BBB","BB","B"] if r in set(df["rating"].dropna().unique())]
+                    groups = order if order else sorted(df["rating"].dropna().unique())
+                    data = [df.loc[df["rating"] == r, "y_bps"].astype(float).dropna().values for r in groups]
+                    ax.boxplot(data, labels=groups, showfliers=False)
+                    ax.set_title("y_bps by rating")
+                    ax.set_ylabel("bps")
+                    fig.tight_layout()
+                    pdf_out.savefig(fig)
+                    plt.close(fig)
+            except Exception:
+                pass
+
         # Distribution pages with per-plot descriptions
         # Numeric
         for c in num_cols:
