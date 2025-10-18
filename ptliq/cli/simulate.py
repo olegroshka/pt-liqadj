@@ -32,7 +32,7 @@ def _getattr_safe(obj, name: str, default):
 
 @app.command()
 def main(
-    config: Path = typer.Option(Path("configs/simulate.yaml"), help="YAML config with data.sim"),
+    config: Path = typer.Option(Path("configs/base.yaml"), help="YAML config with data.sim"),
     outdir: Path = typer.Option(Path("data/raw/sim"), help="Output directory"),
     seed: Optional[int] = typer.Option(None, help="Override seed"),
 

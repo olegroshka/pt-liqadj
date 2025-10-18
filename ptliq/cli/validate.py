@@ -18,7 +18,7 @@ def app_main(
     outdir: Path = typer.Option(Path("data/interim/validated"), help="Where to write validation report"),
     fail_on_error: bool = typer.Option(True, help="Exit with non-zero code if validation fails"),
     loglevel: str = typer.Option("INFO", help="Log level (DEBUG|INFO|WARNING|ERROR|CRITICAL)"),
-    config: Path = typer.Option(Path("configs/simulate.yaml"), help="YAML config with optional validation settings"),
+    config: Path = typer.Option(Path("configs/base.yaml"), help="YAML base config with optional validation settings"),
 ):
     """
     Validate raw data (schema, keys, referential integrity, arithmetic identities).
