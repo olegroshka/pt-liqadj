@@ -1,3 +1,4 @@
+# ptliq/cli/validate.py
 from __future__ import annotations
 from pathlib import Path
 import json
@@ -19,7 +20,8 @@ def app_main(
     loglevel: str = typer.Option("INFO", help="Log level (DEBUG|INFO|WARNING|ERROR|CRITICAL)"),
 ):
     """
-    Validate raw data (schema, keys, referential integrity). Writes a JSON report.
+    Validate raw data (schema, keys, referential integrity, arithmetic identities).
+    Writes a JSON report with errors and warnings.
     """
     setup_logging(loglevel)
     logging.info("Validating rawdir=%s", rawdir)
@@ -32,6 +34,14 @@ def app_main(
     with open(outpath, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
+    # Summaries
+    table_errs = sum(len(t.get("errors", [])) for t in report.get("tables", []))
+    table_warns = sum(len(t.get("warnings", [])) for t in report.get("tables", []))
+    cross = report.get("cross_checks", {})
+    cross_errs = len(cross.get("errors", []))
+    cross_warns = len(cross.get("warnings", []))
+    print(f"[dim]Summary:[/dim] errors={table_errs + cross_errs} warnings={table_warns + cross_warns}")
+
     if report["passed"]:
         print(f"[bold green]VALIDATION PASSED[/bold green]  report: {outpath}")
         raise typer.Exit(code=0)
@@ -39,12 +49,14 @@ def app_main(
         print(f"[bold red]VALIDATION FAILED[/bold red]  report: {outpath}")
         for t in report.get("tables", []):
             if not t.get("passed", False):
-                print(f"  • table={t['table']} errors={t.get('errors')}")
+                print(f"  • table={t['table']} errors={t.get('errors')} warnings={t.get('warnings')}")
         if report.get("cross_checks"):
-            print(f"  • cross={report['cross_checks']}")
+            cx = report["cross_checks"]
+            if cx.get("errors"): print(f"  • cross errors={cx['errors']}")
+            if cx.get("warnings"): print(f"  • cross warnings={cx['warnings']}")
         raise typer.Exit(code=1 if fail_on_error else 0)
 
-# expose Typer app for console_scripts target
+# expose Typer app
 app = app
 
 if __name__ == "__main__":

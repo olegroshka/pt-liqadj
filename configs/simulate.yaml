@@ -11,21 +11,41 @@ paths:
 
 data:
   sim:
+    # simulate.yaml — configuration for simulate.py
     n_bonds: 300
     n_days: 30
     providers: [ "P1" ]
-    seed: 7
+    seed: 42
 
-    # new fields (optional; if omitted, CLI will use SimParams defaults)
+    # Reference price controls
     par: 100.0
     base_spread_bps: 0.0
     sector_spread_bps: 3.0
     rating_spread_bps: 5.0
     clean_price_noise_bps: 2.0
 
+    # Liquidity premium generator (target)
     liq_size_coeff: 8.0
     liq_side_coeff: 12.0
     liq_sector_coeff: 2.0
     liq_rating_coeff: -2.0
     liq_eps_bps: 3.0
     micro_price_noise_bps: 1.0
+
+    # TRACE/market behavior
+    ats_share: 0.08
+    late_share: 0.02
+    asof_share: 0.012
+    cancel_share: 0.004
+
+    # Portfolio behavior
+    portfolio_share: 0.17
+    portfolio_patterns: [ "balanced", "sector_crowding", "issuer_crowding", "curve_imbalance" ]
+    portfolio_pattern_probs: [ 0.4, 0.25, 0.2, 0.15 ]
+
+    # TRACE size caps
+    hy_cap: 1000000.0
+    ig_cap: 5000000.0
+
+    # Output
+    outdir: "data/raw/sim"
