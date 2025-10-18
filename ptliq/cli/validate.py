@@ -18,6 +18,7 @@ def app_main(
     outdir: Path = typer.Option(Path("data/interim/validated"), help="Where to write validation report"),
     fail_on_error: bool = typer.Option(True, help="Exit with non-zero code if validation fails"),
     loglevel: str = typer.Option("INFO", help="Log level (DEBUG|INFO|WARNING|ERROR|CRITICAL)"),
+    config: Path = typer.Option(Path("configs/simulate.yaml"), help="YAML config with optional validation settings"),
 ):
     """
     Validate raw data (schema, keys, referential integrity, arithmetic identities).
@@ -25,7 +26,13 @@ def app_main(
     """
     setup_logging(loglevel)
     logging.info("Validating rawdir=%s", rawdir)
-    report = validate_raw(rawdir)
+    # Load optional config for validator rules (expected_null, allow-lists)
+    try:
+        from ptliq.utils.config import load_config as _load_cfg  # lazy import
+        cfg = _load_cfg(config)
+    except Exception:
+        cfg = None
+    report = validate_raw(rawdir, config=cfg)
 
     stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     outdir = Path(outdir)

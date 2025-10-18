@@ -94,7 +94,7 @@ def _top_correlations(df: pd.DataFrame, targets: List[str], k: int = 10) -> Dict
 # ---------------
 # Table validators
 # ---------------
-def _check_table(path: Path, spec: TableSpec) -> Dict[str, Any]:
+def _check_table(path: Path, spec: TableSpec, val_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     report: Dict[str, Any] = {"table": spec.name, "path": str(path), "exists": path.exists()}
     if not path.exists():
         report["errors"] = [f"Missing table file: {path.name}"]
@@ -141,11 +141,48 @@ def _check_table(path: Path, spec: TableSpec) -> Dict[str, Any]:
     const_cols = _constant_like_columns(df, threshold=0.95)
     near_dupes = _near_duplicate_numeric(df, tol=1e-12)
 
+    # Apply validator config allow-lists
+    def _extract_validation_section(cfg: Optional[Dict[str, Any] | Any]):
+        if cfg is None:
+            return {}
+        # dict-like root
+        if isinstance(cfg, dict):
+            if "validation" in cfg:
+                return cfg.get("validation", {})
+            data = cfg.get("data") if isinstance(cfg.get("data"), dict) else None if not isinstance(cfg, dict) else cfg.get("data")
+            if isinstance(data, dict) and "validation" in data:
+                return data.get("validation", {})
+            return {}
+        # object-like root
+        try:
+            if hasattr(cfg, "validation") and getattr(cfg, "validation") is not None:
+                return getattr(cfg, "validation")
+            if hasattr(cfg, "data"):
+                data = getattr(cfg, "data")
+                # support both dict and object
+                if isinstance(data, dict) and "validation" in data:
+                    return data.get("validation", {})
+                if hasattr(data, "validation"):
+                    return getattr(data, "validation")
+        except Exception:
+            pass
+        return {}
+
+    val_cfg = _extract_validation_section(val_config)
+    # low variation allow-list (suppress warnings for listed columns)
+    low_var_allow_cfg = set(getattr(val_cfg, "low_variation_allowlist", []) if not isinstance(val_cfg, dict) else val_cfg.get("low_variation_allowlist", []))
+    # expected-null rules: list of {column, when}
+    expected_null_rules = (
+        getattr(val_cfg, "expected_null", []) if not isinstance(val_cfg, dict) else val_cfg.get("expected_null", [])
+    ) or (
+        getattr(val_cfg, "expected_missing_by_condition", []) if not isinstance(val_cfg, dict) else val_cfg.get("expected_missing_by_condition", [])
+    ) or []
+
     # Allow-list adjustments for trades table
     expected_missing_notes: List[str] = []
     if spec.name == "trades":
         # Suppress low-variation warnings for expected near-constants
-        low_var_allow = {"is_late","is_asof","is_cancel","sale_condition3","asof_indicator","active_provider"}
+        low_var_allow = {"is_late","is_asof","is_cancel","sale_condition3","asof_indicator","active_provider"} | low_var_allow_cfg
         const_cols = [c for c in const_cols if c not in low_var_allow]
         # Reclassify portfolio_id missingness as expected when is_portfolio == False
         if "portfolio_id" in df.columns and "is_portfolio" in df.columns:
@@ -159,7 +196,34 @@ def _check_table(path: Path, spec: TableSpec) -> Dict[str, Any]:
 
     # warn on high missingness and constancy
     high_missing = [c for c, p in miss.items() if p > 0.02]
-    # Remove portfolio_id from high-missing if expected
+
+    # Config-driven expected-null removal from high-missing list
+    try:
+        for rule in expected_null_rules:
+            col = str(rule.get("column", ""))
+            when = str(rule.get("when", ""))
+            if not col or col not in df.columns or not when:
+                continue
+            # build condition mask safely using pandas.eval
+            try:
+                cond_mask = df.eval(when)
+                cond_mask = cond_mask.astype(bool)
+            except Exception:
+                # fallback: try query (will error if bad); if fails, skip rule
+                try:
+                    cond_mask = df.query(when).index.to_series().reindex(df.index, fill_value=False).astype(bool)
+                except Exception:
+                    continue
+            missing_mask = df[col].isna()
+            # If all missing values occur where condition is True, treat as expected
+            if bool(((missing_mask) & (~cond_mask)).sum() == 0) and bool(missing_mask.any()):
+                if col in high_missing:
+                    high_missing = [c for c in high_missing if c != col]
+                    expected_missing_notes.append(f"{col} missing under condition '{when}' (expected)")
+    except Exception:
+        pass
+
+    # Remove portfolio_id from high-missing if expected by built-in rule
     if spec.name == "trades" and "portfolio_id" in high_missing and expected_missing_notes:
         high_missing = [c for c in high_missing if c != "portfolio_id"]
     if high_missing:
@@ -271,6 +335,12 @@ def _cross_checks(bonds: pd.DataFrame, trades: pd.DataFrame) -> Dict[str, Any]:
         mismatch = int((trades["trace_cap_indicator"].astype(bool) != mask.astype(bool)).sum())
         if mismatch > 0:
             errors.append(f"trades: trace_cap_indicator mismatch rows: {mismatch}")
+        # If capped, reported_size must equal cap_threshold
+        if {"reported_size"}.issubset(trades.columns):
+            capped = trades["trace_cap_indicator"].astype(bool)
+            bad_eq = int((trades.loc[capped, "reported_size"] != trades.loc[capped, "cap_threshold"]).sum())
+            if bad_eq > 0:
+                errors.append(f"trades: capped rows with reported_size != cap_threshold: {bad_eq}")
 
     # price_dirty_exec ≈ price_clean_exec + accrued_interest
     if {"price_dirty_exec","price_clean_exec","accrued_interest"}.issubset(trades.columns):
@@ -337,6 +407,25 @@ def _cross_checks(bonds: pd.DataFrame, trades: pd.DataFrame) -> Dict[str, Any]:
         if non_port_bad > 0:
             errors.append(f"trades: non-portfolio rows must have y_delta_port_bps == 0.0: {non_port_bad}")
 
+    # Side effect on premiums: SELL should have higher mean y_bps than BUY
+    if {"y_bps","side"}.issubset(trades.columns):
+        try:
+            grp = trades.groupby(trades["side"].astype(str))["y_bps"].mean()
+            if {"SELL","BUY"}.issubset(set(grp.index)):
+                if not (float(grp.get("SELL", 0.0)) > float(grp.get("BUY", 0.0))):
+                    warnings.append("trades: expected mean(y_bps|SELL) > mean(y_bps|BUY) not observed")
+        except Exception:
+            pass
+
+    # ATS share stability in [5%, 20%]
+    if "ats" in trades.columns:
+        try:
+            p = float(trades["ats"].astype(bool).mean()) if len(trades) > 0 else float("nan")
+            if np.isfinite(p) and not (0.05 <= p <= 0.20):
+                warnings.append(f"trades: ats share {p:.3%} outside [5%, 20%]")
+        except Exception:
+            pass
+
     # leakage detector on numeric columns vs key targets
     leakage_diag: Dict[str, Dict[str, float]] = {}
     try:
@@ -368,7 +457,7 @@ def _cross_checks(bonds: pd.DataFrame, trades: pd.DataFrame) -> Dict[str, Any]:
 # -------------------------
 # Public validation function
 # -------------------------
-def validate_raw(rawdir: Path) -> Dict[str, Any]:
+def validate_raw(rawdir: Path, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Validate the raw schema: bonds.parquet + trades.parquet.
     Checks:
@@ -413,7 +502,7 @@ def validate_raw(rawdir: Path) -> Dict[str, Any]:
 
     for spec in specs:
         path = rawdir / f"{spec.name}.parquet"
-        trep = _check_table(path, spec)
+        trep = _check_table(path, spec, val_config=config)
         table_reports.append(trep)
         if trep.get("exists") and trep.get("passed"):
             name_to_df[spec.name] = pd.read_parquet(path)

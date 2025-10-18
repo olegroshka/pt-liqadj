@@ -17,6 +17,20 @@ data:
     providers: [ "P1" ]
     seed: 42
 
+  validation:
+    # Columns expected to be null under certain conditions — suppress high-missingness warnings
+    expected_null:
+      - column: portfolio_id
+        when: "is_portfolio == False"
+    # Columns allowed to be near-constant without raising low-variation warnings
+    low_variation_allowlist:
+      - is_late
+      - is_asof
+      - is_cancel
+      - sale_condition3
+      - asof_indicator
+      - active_provider
+
     # Pricing / reference price
     par: 100.0
     base_spread_bps: 0.0

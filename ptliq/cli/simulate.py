@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Optional, List
+from dataclasses import asdict
+import json
 
 import typer
 from rich import print
@@ -149,6 +151,20 @@ def main(
     logging.info("Using output dir: %s", outdir)
 
     frames = simulate(params)
+
+    # Write reproducibility sidecar metadata
+    try:
+        meta = asdict(params)
+        # make non-serializable types JSON-friendly
+        if isinstance(meta.get("outdir"), Path):
+            meta["outdir"] = str(meta["outdir"])  # type: ignore[index]
+        meta["sim_version"] = "0.1.0"
+        from datetime import datetime as _dt
+        meta["generated_at_utc"] = _dt.utcnow().isoformat(timespec="seconds")
+        with open(Path(outdir) / "_meta.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+    except Exception:
+        logging.warning("Could not write _meta.json sidecar metadata", exc_info=False)
 
     # Drop compatibility alias to avoid duplicate numeric columns on disk
     trades_out = frames["trades"].drop(columns=["price_clean_exec"], errors="ignore")

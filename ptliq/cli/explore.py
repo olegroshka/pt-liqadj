@@ -497,6 +497,37 @@ def _write_pdf(df: pd.DataFrame, outdir: Path, stem: str, bins: int = 20) -> Pat
                 rows.append(f"• {k:16s} {obs_min:12.3f}   {obs_max:12.3f}   {status}")
         add_text_page("Top checks — expected vs observed", rows)
 
+        # Quick checks summary: splits and invariants
+        try:
+            lines = [
+                "Quick checks: BUY/SELL split, ATS%, cap% and key invariants",
+                "",
+            ]
+            if "side" in df.columns:
+                counts = df["side"].astype(str).value_counts()
+                n_buy = int(counts.get("BUY", 0)); n_sell = int(counts.get("SELL", 0))
+                lines.append(f"BUY={n_buy:,}  SELL={n_sell:,}  (total={len(df):,})")
+                if "y_bps" in df.columns:
+                    try:
+                        m = df.groupby(df["side"].astype(str))["y_bps"].mean()
+                        buy_m = float(m.get("BUY", float("nan"))); sell_m = float(m.get("SELL", float("nan")))
+                        ok = (np.isfinite(buy_m) and np.isfinite(sell_m) and (sell_m > buy_m))
+                        lines.append(f"mean(y_bps|SELL)={sell_m:.3f}  mean(y_bps|BUY)={buy_m:.3f}  → {'OK' if ok else 'WARN'}")
+                    except Exception:
+                        pass
+            if "ats" in df.columns:
+                p = float(df["ats"].astype(bool).mean()) if len(df) > 0 else float("nan")
+                band_ok = np.isfinite(p) and (0.05 <= p <= 0.20)
+                lines.append(f"ats share={p:.2%}  expected [5%,20%] → {'OK' if band_ok else 'WARN'}")
+            if {"trace_cap_indicator","reported_size","cap_threshold"}.issubset(df.columns):
+                capped = df["trace_cap_indicator"].astype(bool)
+                n_capped = int(capped.sum())
+                bad_eq = int((df.loc[capped, "reported_size"] != df.loc[capped, "cap_threshold"]).sum()) if n_capped > 0 else 0
+                lines.append(f"capped rows={n_capped:,}; reported_size==cap_threshold mismatches={bad_eq}")
+            add_text_page("Quick checks", lines)
+        except Exception:
+            pass
+
         # Daily medians strip (market sanity)
         if "trade_dt" in df.columns:
             try:
