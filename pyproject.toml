@@ -34,6 +34,10 @@ ptliq-gnn-score = "ptliq.cli.gnn_score:app"
 ptliq-gnn-serve = "ptliq.cli.gnn_serve:app"
 ptliq-gnn-report = "ptliq.cli.gnn_report:app"
 ptliq-explore = "ptliq.cli.explore:app"
+ptliq-move = "ptliq.cli.move:app"
+ptliq-ig-oas = "ptliq.cli.ig_oas:app"
+ptliq-hy-oas = "ptliq.cli.hy_oas:app"
+ptliq-vix = "ptliq.cli.vix:app"
 
 
 [tool.setuptools.packages.find]
@@ -43,6 +47,7 @@ exclude = ["tests*", "notebooks*", "data*", "models*", "configs*", "reports*", "
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "mypy", "types-PyYAML"]
+market = ["yfinance", "pandas_datareader", "fredapi"]
 
 # (optional) if you have non-.py files inside ptliq you want included:
 # [tool.setuptools.package-data]

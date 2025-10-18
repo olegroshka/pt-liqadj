@@ -1,0 +1,15 @@
+# Local secrets (do NOT commit)
+.env
+configs/local/
+
+# Bytecode / cache
+__pycache__/
+*.py[cod]
+
+# IDE / project files
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
