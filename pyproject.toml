@@ -33,6 +33,7 @@ ptliq-gnn-pack = "ptliq.cli.gnn_pack:app"
 ptliq-gnn-score = "ptliq.cli.gnn_score:app"
 ptliq-gnn-serve = "ptliq.cli.gnn_serve:app"
 ptliq-gnn-report = "ptliq.cli.gnn_report:app"
+ptliq-explore = "ptliq.cli.explore:app"
 
 
 [tool.setuptools.packages.find]
