@@ -1,0 +1,31 @@
+project:
+  name: pt-liqadj
+  seed: 42
+
+paths:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  features_dir: data/features
+  models_dir: models
+  reports_dir: reports
+
+data:
+  sim:
+    n_bonds: 300
+    n_days: 30
+    providers: [ "P1" ]
+    seed: 7
+
+    # new fields (optional; if omitted, CLI will use SimParams defaults)
+    par: 100.0
+    base_spread_bps: 0.0
+    sector_spread_bps: 3.0
+    rating_spread_bps: 5.0
+    clean_price_noise_bps: 2.0
+
+    liq_size_coeff: 8.0
+    liq_side_coeff: 12.0
+    liq_sector_coeff: 2.0
+    liq_rating_coeff: -2.0
+    liq_eps_bps: 3.0
+    micro_price_noise_bps: 1.0
