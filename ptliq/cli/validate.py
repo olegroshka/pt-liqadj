@@ -44,6 +44,16 @@ def app_main(
 
     if report["passed"]:
         print(f"[bold green]VALIDATION PASSED[/bold green]  report: {outpath}")
+        # Print details if there are any warnings or (unexpected) errors
+        if (table_errs + cross_errs + table_warns + cross_warns) > 0:
+            for t in report.get("tables", []):
+                errs = t.get("errors", [])
+                warns = t.get("warnings", [])
+                if errs or warns:
+                    print(f"  • table={t['table']} errors={errs} warnings={warns}")
+            cx = report.get("cross_checks", {})
+            if cx.get("errors"): print(f"  • cross errors={cx['errors']}")
+            if cx.get("warnings"): print(f"  • cross warnings={cx['warnings']}")
         raise typer.Exit(code=0)
     else:
         print(f"[bold red]VALIDATION FAILED[/bold red]  report: {outpath}")

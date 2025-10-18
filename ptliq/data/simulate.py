@@ -371,7 +371,7 @@ def _compose_y_bps(
         + params.liq_side_coeff * side_sign
         + params.liq_sector_coeff * sec_code
         + params.liq_rating_coeff * rat_code
-        + params.liq_urgency_coeff * urgency
+        + params.liq_urgency_coeff * (urgency - 0.5)
     )
     eps_bps = rng.normal(0.0, params.liq_eps_bps)
     y_bps = float(baseline_ref_bps + h_bps + port_delta_bps + eps_bps)
@@ -396,13 +396,17 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
     start = datetime(2025, 1, 2, 9, 0, 0)
 
     # Provider baselines
-    bonds2, active_provider = _providers_liq_and_pref(params, bonds)
-    provider_act_col = f"pi_ref_{active_provider}_bps"
-    provider_liq_col = f"vendor_{active_provider}_liq"
+    bonds2, active_provider_default = _providers_liq_and_pref(params, bonds)
+    # provider columns will be selected per-trade to increase realism
 
     # encodings
     sector_levels = {s: i for i, s in enumerate(sorted(bonds2["sector"].unique().tolist()))}
     rating_levels = {r: i for i, r in enumerate(sorted(RATINGS))}
+
+    # provider-specific behavior
+    providers = params.providers if len(params.providers) else ["P1"]
+    prov_bias = {p: float(np.random.default_rng(params.seed + 202 + i).normal(0.0, 1.0)) for i, p in enumerate(providers)}
+    prov_micro_scale = {p: float(np.clip(np.random.default_rng(params.seed + 203 + i).normal(1.0, 0.25), 0.5, 1.8)) for i, p in enumerate(providers)}
 
     trades_rows = []
 
@@ -499,8 +503,16 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
             # urgency
             urgency = float(rng.random())
 
-            # provider baseline (active)
+            # pick active provider per trade
+            provider = rng.choice(providers)
+            provider_act_col = f"pi_ref_{provider}_bps"
+            provider_liq_col = f"vendor_{provider}_liq"
+            active_provider = provider
+            # provider baseline (reference premium)
             pi_ref_bps = float(bnd[provider_act_col])
+            # expose a slightly noisy reference to avoid perfect correlation with vendor_liq
+            pi_ref_noise = float(rng.normal(0.0, 2.0))
+            y_pi_ref_out = float(pi_ref_bps + pi_ref_noise)
 
             # standardize size via the generator's log parameters
             size_z = (math.log(max(1.0, size)) - mu) / (sigma + 1e-8)
@@ -533,8 +545,21 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 jitter = int(rng_b.integers(-params.port_time_spread_sec, params.port_time_spread_sec + 1))
                 base_time = base_time + timedelta(seconds=jitter)
 
-                port_delta_bps = _portfolio_delta(pattern, side_sign, port_skew, bnd, focus)
-                port_similarity = 1.0
+                base_port_delta = _portfolio_delta(pattern, side_sign, port_skew, bnd, focus)
+                # continuous similarity for portfolio trades
+                port_similarity = float(np.random.default_rng(seed_basket + 1).beta(3, 4))
+                sigma_port = float(1.0 + 2.0 * abs(port_skew) * port_similarity)
+                port_delta_bps = float(np.random.default_rng(seed_basket + 2).normal(base_port_delta, sigma_port))
+
+            # portfolio delta handling for label vs reporting
+            if in_portfolio and basket_id is not None:
+                delta_for_y = float(port_delta_bps)
+                y_delta_out = float(port_delta_bps)
+            else:
+                # continuous low similarity for non-portfolio lines
+                port_similarity = float(rng.beta(1.0, 9.0))
+                delta_for_y = 0.0
+                y_delta_out = float('nan')
 
             # truthful premium & observed prices
             y_bps, h_bps, eps_bps, delta_bps, pi_ref_used = _compose_y_bps(
@@ -545,10 +570,10 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 rat_code=rat_code,
                 urgency=urgency,
                 params=params,
-                port_delta_bps=port_delta_bps,
+                port_delta_bps=delta_for_y,
                 rng=rng,
             )
-            micro = float(rng.normal(0.0, params.micro_price_noise_bps))
+            micro = float(rng.normal(prov_bias[provider], params.micro_price_noise_bps * prov_micro_scale[provider]))
             delta_obs_bps = y_bps + micro
             clean_price = float(bnd["price0_clean"])
             price_clean_exec = clean_price * (1.0 - delta_obs_bps / 10_000.0)
@@ -592,11 +617,10 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
 
                 # Truth decomposition
                 y_bps=float(y_bps),
-                price=float(price_clean_exec),
                 y_h_bps=float(h_bps),
                 y_eps_bps=float(eps_bps),
-                y_delta_port_bps=float(delta_bps),
-                y_pi_ref_bps=float(pi_ref_used),
+                y_delta_port_bps=float(y_delta_out),
+                y_pi_ref_bps=float(y_pi_ref_out),
                 urgency=float(urgency),
 
                 # TRACE-like & analytics
@@ -606,7 +630,7 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 is_late=bool(is_late),
                 is_asof=bool(is_asof),
                 is_cancel=bool(is_cancel),
-                contra_party_type="C",
+                contra_party_type=str(rng.choice(["C", "D", "E"], p=[0.9, 0.07, 0.03])),
                 remuneration=str(remuneration),
                 sale_condition3=str(sale_condition3),
                 sale_condition4=str(sale_condition4),
@@ -618,6 +642,7 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 cap_threshold=float(cap_thr),
 
                 clean_price=float(clean_price),
+                price=float(price_clean_exec),
                 price_clean_exec=float(price_clean_exec),
                 accrued_interest=float(accrued),
                 price_dirty_exec=float(price_dirty_exec),
@@ -638,7 +663,7 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
             ))
 
     if not trades_rows:
-        return pd.DataFrame(columns=["ts", "isin", "side", "size", "is_portfolio", "y_bps", "price"])
+        return pd.DataFrame(columns=["ts", "isin", "side", "size", "is_portfolio", "y_bps", "price", "price_clean_exec"])
 
     trades = pd.DataFrame(trades_rows).sort_values(["exec_time", "isin"]).reset_index(drop=True)
     return trades
@@ -656,6 +681,6 @@ def simulate(params: SimParams) -> Dict[str, pd.DataFrame]:
 
     # basic integrity (compatibility)
     assert {"isin", "issuer", "sector", "rating", "issue_date", "maturity", "coupon", "amount_out", "curve_bucket"}.issubset(bonds.columns)
-    assert {"ts", "isin", "side", "size", "is_portfolio", "y_bps", "price"}.issubset(trades.columns)
+    assert {"ts", "isin", "side", "size", "is_portfolio", "y_bps", "price", "price_clean_exec"}.issubset(trades.columns)
 
     return {"bonds": bonds, "trades": trades}

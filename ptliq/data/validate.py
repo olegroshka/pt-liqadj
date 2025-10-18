@@ -33,6 +33,63 @@ def _kind_of(series: pd.Series) -> str:
 def _limited(items: List[Any], n: int = 25) -> List[Any]:
     return items[:n]
 
+# ----------------------------
+# Diagnostics helpers
+# ----------------------------
+
+def _missingness(df: pd.DataFrame) -> Dict[str, float]:
+    if df.empty:
+        return {}
+    return {c: float(df[c].isna().mean()) for c in df.columns}
+
+
+def _constant_like_columns(df: pd.DataFrame, threshold: float = 0.95) -> List[str]:
+    out: List[str] = []
+    if df.empty:
+        return out
+    n = len(df)
+    for c in df.columns:
+        vc = df[c].value_counts(dropna=False)
+        top = int(vc.iloc[0]) if len(vc) > 0 else 0
+        if n > 0 and (top / n) >= threshold:
+            out.append(c)
+    return out
+
+
+def _near_duplicate_numeric(df: pd.DataFrame, tol: float = 1e-12) -> List[Tuple[str, str]]:
+    pairs: List[Tuple[str, str]] = []
+    if df.empty:
+        return pairs
+    num = df.select_dtypes(include=["number"]).copy()
+    cols = list(num.columns)
+    for i in range(len(cols)):
+        a = cols[i]
+        for j in range(i + 1, len(cols)):
+            b = cols[j]
+            # compare only on rows where both are not null
+            both = num[[a, b]].dropna()
+            if both.empty:
+                continue
+            diffmax = float((both[a] - both[b]).abs().max())
+            if diffmax <= tol:
+                pairs.append((a, b))
+    return pairs
+
+
+def _top_correlations(df: pd.DataFrame, targets: List[str], k: int = 10) -> Dict[str, Dict[str, float]]:
+    out: Dict[str, Dict[str, float]] = {}
+    if df.empty:
+        return out
+    num = df.select_dtypes(include=["number"]).copy()
+    if num.empty:
+        return out
+    corr = num.corr(method="pearson")
+    for t in targets:
+        if t in corr.columns:
+            s = corr[t].drop(index=t).dropna().abs().sort_values(ascending=False).head(k)
+            out[t] = {str(idx): float(val) for idx, val in s.items()}
+    return out
+
 
 # ---------------
 # Table validators
@@ -43,6 +100,7 @@ def _check_table(path: Path, spec: TableSpec) -> Dict[str, Any]:
         report["errors"] = [f"Missing table file: {path.name}"]
         report["warnings"] = []
         report["passed"] = False
+        report["diagnostics"] = {}
         return report
 
     df = pd.read_parquet(path)
@@ -78,6 +136,31 @@ def _check_table(path: Path, spec: TableSpec) -> Dict[str, Any]:
             if dup > 0:
                 errors.append(f"Duplicate key rows by {spec.unique_keys}: {dup}")
 
+    # diagnostics & soft checks
+    miss = _missingness(df)
+    const_cols = _constant_like_columns(df, threshold=0.95)
+    near_dupes = _near_duplicate_numeric(df, tol=1e-12)
+
+    # warn on high missingness and constancy
+    high_missing = [c for c, p in miss.items() if p > 0.02]
+    if high_missing:
+        warnings.append(f"high-missingness cols (>2%): {high_missing[:10]}")
+    if const_cols:
+        warnings.append(f"low-variation cols (>=95% same value): {const_cols[:10]}")
+    if near_dupes:
+        # allowlist of known compatibility aliases that are expected to be identical
+        allow_dupes = set()
+        if spec.name == "trades":
+            if "price" in df.columns and "price_clean_exec" in df.columns:
+                allow_dupes.add(("price", "price_clean_exec"))
+                allow_dupes.add(("price_clean_exec", "price"))
+        hard_dupes = [p for p in near_dupes if p not in allow_dupes]
+        soft_dupes = [p for p in near_dupes if p in allow_dupes]
+        if hard_dupes:
+            errors.append(f"near-duplicate numeric columns (tol<=1e-12): {hard_dupes[:10]}")
+        if soft_dupes:
+            warnings.append(f"compatibility duplicate aliases (identical numeric cols): {soft_dupes[:10]}")
+
     # lightweight domain hints (warn only; allow real-world values)
     if spec.name == "bonds":
         if "rating" in df.columns:
@@ -93,6 +176,13 @@ def _check_table(path: Path, spec: TableSpec) -> Dict[str, Any]:
     report["errors"] = _limited(errors)
     report["warnings"] = _limited(warnings)
     report["passed"] = len(errors) == 0
+    # attach diagnostics for machine consumption
+    report["diagnostics"] = {
+        "missingness": miss,
+        "constant_like_cols": const_cols,
+        "near_duplicate_numeric_pairs": near_dupes,
+        "nunique": {c: int(pd.Series(df[c]).nunique(dropna=True)) for c in df.columns},
+    }
     return report
 
 
@@ -219,10 +309,38 @@ def _cross_checks(bonds: pd.DataFrame, trades: pd.DataFrame) -> Dict[str, Any]:
         if multiples > 0:
             warnings.append(f"trades: sizes not multiple of 5,000: {multiples}")
 
+    # portfolio-only fields masking: y_delta_port_bps must be null for non-portfolio
+    if {"is_portfolio","y_delta_port_bps"}.issubset(trades.columns):
+        bad_mask = trades.loc[~trades["is_portfolio"].astype(bool) & trades["y_delta_port_bps"].notna()]
+        n_bad_mask = int(len(bad_mask))
+        if n_bad_mask > 0:
+            errors.append(f"trades: y_delta_port_bps must be null on non-portfolio rows: {n_bad_mask}")
+
+    # leakage detector on numeric columns vs key targets
+    leakage_diag: Dict[str, Dict[str, float]] = {}
+    try:
+        targets = [t for t in ["y_bps", "y_pi_ref_bps"] if t in trades.columns]
+        leakage_diag = _top_correlations(trades, targets=targets, k=10)
+        # flag extreme correlations
+        for t, pairs in leakage_diag.items():
+            for feat, rho in pairs.items():
+                if not np.isfinite(rho):
+                    continue
+                if abs(rho) >= 0.99:
+                    errors.append(f"leakage: |corr({feat},{t})| >= 0.99 → {rho:.3f}")
+                elif abs(rho) >= 0.95:
+                    warnings.append(f"leakage hint: |corr({feat},{t})| >= 0.95 → {rho:.3f}")
+    except Exception:
+        # keep validator robust if correlations fail
+        pass
+
     return {
         "errors": _limited(errors),
         "warnings": _limited(warnings),
-        "passed": len(errors) == 0
+        "passed": len(errors) == 0,
+        "diagnostics": {
+            "leakage_top_correlations": leakage_diag,
+        },
     }
 
 
