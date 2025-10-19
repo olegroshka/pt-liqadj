@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pt-liqadj"
 version = "0.1.0"
-dependencies = ["pydantic", "pyarrow", "pandas", "numpy", "pyyaml", "typer", "rich", "torch", "torch-geometric", "fastapi", "uvicorn"]
+dependencies = ["pydantic", "pyarrow", "pandas", "numpy", "pyyaml", "typer", "rich", "torch", "torch-geometric", "fastapi", "uvicorn", "tensorboard"]
 
 [project.scripts]
 ptliq-simulate = "ptliq.cli.simulate:app"
@@ -38,6 +38,14 @@ ptliq-move = "ptliq.cli.move:app"
 ptliq-ig-oas = "ptliq.cli.ig_oas:app"
 ptliq-hy-oas = "ptliq.cli.hy_oas:app"
 ptliq-vix = "ptliq.cli.vix:app"
+
+ptliq-gat-train = "ptliq.cli.gat_train:app"
+# Backward-compatible misspelled alias
+ptliq-start-tensor-bord = "ptliq.cli.tensorboard:app"
+# Correct spellings/aliases
+ptliq-start-tensorboard = "ptliq.cli.tensorboard:app"
+ptliq-tensorboard = "ptliq.cli.tensorboard:app"
+ptliq-stop-tensor-bord = "ptliq.cli.tensorboard_stop:app"
 
 
 [tool.setuptools.packages.find]

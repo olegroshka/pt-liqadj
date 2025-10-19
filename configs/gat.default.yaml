@@ -1,0 +1,26 @@
+sampler:
+  expo_scale: 5.0e4
+  clip_w: 5.0
+  chunk_min: 200
+  chunk_max: 300
+  bucket_minutes: 15
+  seed: 17
+
+train:
+  device: auto
+  max_epochs: 25
+  batch_size: 32
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  patience: 5
+  seed: 42
+  clip_grad: 1.0
+  print_every: 50
+
+model:
+  d_model: 128
+  heads: 4
+  rel_emb_dim: 16
+  issuer_emb_dim: 16
+  dropout: 0.10
+  rel_init_boost: {}
