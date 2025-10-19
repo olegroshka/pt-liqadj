@@ -107,6 +107,7 @@ CURVE_BUCKETS_COARSE = ["2Y", "5Y", "10Y", "30Y"]
 CURVE_BUCKETS_FINE = ["0-3y", "3-5y", "5-7y", "7-10y", "10-15y"]
 DAY_COUNTS = ["30/360", "ACT/ACT"]
 FREQ_CHOICES = [1, 2, 2, 2, 4]  # weighted random (mostly semi-annual)
+CURRENCIES = ["USD", "EUR", "GBP"]
 
 
 # --------------------------------------------------------------------------------------
@@ -232,6 +233,7 @@ def _gen_bonds(n: int, seed: int) -> pd.DataFrame:
     tenors = [max(0.25, (md - today).days / 365.25) for md in maturities]
     freqs = rng.choice(FREQ_CHOICES, size=n)
     day_counts = rng.choice(DAY_COUNTS, size=n)
+    currencies = rng.choice(CURRENCIES, size=n, p=[0.8, 0.15, 0.05])
 
     # curves / pricing
     base_curve_yield = np.array([ns_yield(t) for t in tenors], dtype=float)
@@ -285,6 +287,7 @@ def _gen_bonds(n: int, seed: int) -> pd.DataFrame:
         "duration_mod": mdur.astype(float),
         "dv01_per_100": dv01.astype(float),
         "vendor_liq_score_static": vendor_liq_static.astype(float),
+        "currency": currencies.tolist(),
     })
     return bonds
 
@@ -663,6 +666,8 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 portfolio_pattern=str(pattern) if pattern else "",
                 portfolio_skew=float(port_skew),
                 portfolio_similarity=float(port_similarity),
+
+                currency=str(bnd.get("currency", "USD")),
             ))
 
     if not trades_rows:

@@ -18,6 +18,20 @@ from ptliq.features.build import build_features
 # -----------------------
 app = typer.Typer(no_args_is_help=True)
 
+# Allow invoking without subcommand by forwarding to 'features'
+@app.callback(invoke_without_command=True)
+def _default(
+    ctx: typer.Context,
+    rawdir: Path = typer.Option(Path("data/raw/sim"), help="Raw parquet dir"),
+    splits: Path = typer.Option(None, help="Path to ranges.json from ptliq-split"),
+    outdir: Path = typer.Option(Path("data/features"), help="Output base dir"),
+    run_id: str = typer.Option("exp001", help="Run identifier"),
+):
+    if ctx.invoked_subcommand is None:
+        if splits is None:
+            raise typer.BadParameter("--splits is required when invoking without a subcommand")
+        build_minimal_features(rawdir=rawdir, splits=splits, outdir=outdir, run_id=run_id)
+
 # -----------------------
 # Existing minimal features command (preserved)
 # -----------------------
