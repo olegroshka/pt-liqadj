@@ -12,8 +12,8 @@ paths:
 data:
   sim:
     # base.yaml — base configuration for the pipeline (used by simulate.py and others)
-    n_bonds: 300
-    n_days: 30
+    n_bonds: 1000
+    n_days: 90
     providers: [ "P1" ]
     seed: 42
 

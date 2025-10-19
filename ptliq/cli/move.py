@@ -47,6 +47,13 @@ def _download_move(start: pd.Timestamp, end: pd.Timestamp, interval: str = "1d")
     if df is None or df.empty:
         raise RuntimeError("No data received for ^MOVE from Yahoo Finance in the requested range.")
 
+    # If yfinance returns a MultiIndex (Price, Ticker), collapse to the Price level
+    if hasattr(df.columns, "nlevels") and getattr(df.columns, "nlevels", 1) > 1:
+        try:
+            df.columns = df.columns.get_level_values(0)
+        except Exception:
+            df.columns = [c[0] if isinstance(c, tuple) and len(c) > 0 else c for c in df.columns]
+
     # Capture original index (often datetime, sometimes unnamed)
     orig_index = df.index.copy()
 
@@ -114,8 +121,23 @@ def fetch(
         print(f"[red]Error:[/red] {e}")
         raise typer.Exit(code=1)
 
-    path = write_parquet(df, out)
-    print(f"[bold green]Done.[/bold green] rows={len(df):,} → {path}")
+    # Ensure schema matches OAS: [date, value]
+    val_col = None
+    for c in ("close", "adj_close"):
+        if c in df.columns:
+            val_col = c
+            break
+    if val_col is None:
+        num_cols = [c for c in df.columns if c != "date"]
+        if num_cols:
+            val_col = num_cols[0]
+        else:
+            print("[red]No value column found in MOVE data.")
+            raise typer.Exit(code=1)
+    out_df = df[["date", val_col]].rename(columns={val_col: "value"})
+
+    path = write_parquet(out_df, out)
+    print(f"[bold green]Done.[/bold green] rows={len(out_df):,} → {path}")
 
 
 # expose Typer app

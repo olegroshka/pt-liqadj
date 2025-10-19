@@ -44,8 +44,25 @@ def fetch(
     except Exception as e:
         print(f"[red]Error:[/red] {e}")
         raise typer.Exit(code=1)
-    path = write_parquet(df, out)
-    print(f"[bold green]Done.[/bold green] rows={len(df):,} → {path}")
+
+    # Ensure schema matches OAS: [date, value]
+    val_col = None
+    for c in ("close", "adj_close"):
+        if c in df.columns:
+            val_col = c
+            break
+    if val_col is None:
+        # fallback to any numeric column except date
+        num_cols = [c for c in df.columns if c != "date"]
+        if num_cols:
+            val_col = num_cols[0]
+        else:
+            print("[red]No value column found in VIX data.")
+            raise typer.Exit(code=1)
+    out_df = df[["date", val_col]].rename(columns={val_col: "value"})
+
+    path = write_parquet(out_df, out)
+    print(f"[bold green]Done.[/bold green] rows={len(out_df):,} → {path}")
 
 
 app = app

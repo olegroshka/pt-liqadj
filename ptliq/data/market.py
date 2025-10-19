@@ -108,6 +108,7 @@ def fetch_fred_series(series_id: str, start: pd.Timestamp, end: pd.Timestamp) ->
 def fetch_yahoo_single(ticker: str, start: pd.Timestamp, end: pd.Timestamp, interval: str = "1d") -> pd.DataFrame:
     """
     Fetch a single Yahoo Finance ticker and normalize to columns [date, close, volume] when available.
+    Handles recent yfinance behavior returning MultiIndex columns by flattening to the first level.
     """
     try:
         import yfinance as yf  # type: ignore
@@ -128,6 +129,14 @@ def fetch_yahoo_single(ticker: str, start: pd.Timestamp, end: pd.Timestamp, inte
     if df is None or df.empty:
         raise RuntimeError(f"No data received for {ticker} from Yahoo Finance in the requested range.")
 
+    # If yfinance returns a MultiIndex (Price, Ticker), collapse to the Price level
+    if hasattr(df.columns, "nlevels") and getattr(df.columns, "nlevels", 1) > 1:
+        try:
+            df.columns = df.columns.get_level_values(0)
+        except Exception:
+            # fallback: flatten by taking the first element of tuple
+            df.columns = [c[0] if isinstance(c, tuple) and len(c) > 0 else c for c in df.columns]
+
     orig_index = df.index.copy()
     df = df.reset_index()
     df.columns = [str(c).lower().replace(" ", "_") for c in df.columns]
@@ -142,6 +151,7 @@ def fetch_yahoo_single(ticker: str, start: pd.Timestamp, end: pd.Timestamp, inte
         else:
             df["date"] = pd.to_datetime(orig_index, errors="coerce")
 
+    # If 'adj close' exists, prefer it as 'close'
     if "adj_close" in df.columns:
         df["close"] = df["adj_close"]
 
