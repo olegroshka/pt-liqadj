@@ -114,3 +114,58 @@ class BondBackbone(nn.Module):
         h_sec = self._mean_pool_batch_peers(h_self, node_ids, sector_groups, sectors)  # [B, D0]
 
         return self.agg(torch.cat([h_self, h_iss, h_sec], dim=1))  # [B, out_dim]
+
+
+from .portfolio_encoder import PMAPooling, TargetPortfolioCrossAttention
+
+class LiquidityResidualBackbone(nn.Module):
+    """
+    Target/basket reasoning:
+      - PMA summary of portfolio tokens (DV01-weighted values)
+      - Target→portfolio cross-attention
+      - Fuse [target, context, fused] and predict via heads
+    """
+    def __init__(self, d_model: int = 128, n_heads: int = 4, dropout: float = 0.1, heads_module=None):
+        super().__init__()
+        self.pma   = PMAPooling(d_model, n_heads, dropout)
+        self.cross = TargetPortfolioCrossAttention(d_model, n_heads, dropout)
+        self.fuse_ln = nn.LayerNorm(3*d_model)
+        self.fuse    = nn.Sequential(nn.Linear(3*d_model, d_model),
+                                     nn.ReLU(), nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+                                     nn.Linear(d_model, d_model))
+        if heads_module is None:
+            from .heads import QuantileHeads
+            heads_module = QuantileHeads
+        self.heads = heads_module(d_model, hidden=256, dropout=dropout)
+
+    def forward_from_node_embeddings(
+        self,
+        node_embeddings: torch.Tensor,           # (N, d)
+        target_index: torch.LongTensor,          # (B,)
+        port_index: torch.LongTensor,            # (T,)
+        port_batch: torch.LongTensor,            # (T,) in [0..B-1]
+        port_weight: torch.Tensor | None = None  # (T,)
+    ) -> Dict[str, torch.Tensor]:
+        B = target_index.numel()
+        d = node_embeddings.size(-1)
+        device = node_embeddings.device
+
+        targets  = node_embeddings[target_index]                  # (B,d)
+        contexts = torch.zeros(B, d, device=device)
+        fused    = torch.zeros(B, d, device=device)
+
+        for b in range(B):
+            mask = (port_batch == b)
+            if mask.any():
+                tokens = node_embeddings[port_index[mask]]        # (n_i, d)
+                w      = port_weight[mask] if port_weight is not None else None
+                contexts[b] = self.pma(tokens, w)
+                fused[b]    = self.cross(targets[b], tokens, w)
+            else:
+                contexts[b] = torch.zeros(d, device=device)
+                fused[b]    = targets[b]
+
+        z = torch.cat([targets, contexts, fused], dim=-1)
+        z = self.fuse_ln(z)
+        z = self.fuse(z)
+        return self.heads(z)

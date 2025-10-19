@@ -104,3 +104,56 @@ class PortfolioEncoder(nn.Module):
         beta = self._beta()
         out = h_t + beta * (context - h_t)                      # (B, D)
         return out
+
+
+# -----------------------------
+# New PMA and Cross-Attention used by the Colab backbone
+# -----------------------------
+import torch.nn.functional as F  # noqa: F401 (kept for potential extensions)
+
+class PMAPooling(nn.Module):
+    """Pooling by Multi-head Attention (Zaheer et al.): learnable seed attends to portfolio tokens."""
+    def __init__(self, d_model: int, n_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.seed = nn.Parameter(torch.randn(1, 1, d_model))
+        self.mha  = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        self.ln1  = nn.LayerNorm(d_model)
+        self.ff   = nn.Sequential(nn.Linear(d_model, 2*d_model), nn.ReLU(), nn.Linear(2*d_model, d_model))
+        self.ln2  = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor, weights: torch.Tensor | None = None) -> torch.Tensor:
+        # x: (n_i, d) for a single basket i
+        if x.numel() == 0:
+            return torch.zeros(x.size(-1), device=x.device)
+        q = self.seed.expand(1, 1, x.size(-1))   # (1,1,d)
+        k = x.unsqueeze(0)                       # (1,n_i,d)
+        v = k.clone()
+        if weights is not None:
+            v = v * (1.0 + weights.view(1, -1, 1).abs())
+        attn, _ = self.mha(q, k, v, need_weights=False)  # (1,1,d)
+        out = self.ln1(attn + q)
+        out = self.ln2(self.ff(out) + out)               # (1,1,d)
+        return out.squeeze(0).squeeze(0)                 # (d,)
+
+class TargetPortfolioCrossAttention(nn.Module):
+    """Target → portfolio cross-attention, with DV01-weighted values."""
+    def __init__(self, d_model: int, n_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ff  = nn.Sequential(nn.Linear(d_model, 2*d_model), nn.ReLU(), nn.Linear(2*d_model, d_model))
+        self.ln2 = nn.LayerNorm(d_model)
+
+    def forward(self, h_target: torch.Tensor, port_tokens: torch.Tensor, weights: torch.Tensor | None = None) -> torch.Tensor:
+        # h_target: (d,), port_tokens: (n_i, d)
+        if port_tokens.numel() == 0:
+            return h_target
+        q = h_target.view(1, 1, -1)                     # (1,1,d)
+        k = port_tokens.unsqueeze(0)                    # (1,n_i,d)
+        v = k.clone()
+        if weights is not None:
+            v = v * (1.0 + weights.view(1, -1, 1).abs())
+        attn, _ = self.mha(q, k, v, need_weights=False) # (1,1,d)
+        out = self.ln1(attn + q)
+        out = self.ln2(self.ff(out) + out)              # (1,1,d)
+        return out.squeeze(0).squeeze(0)                # (d,)

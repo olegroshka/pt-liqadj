@@ -324,3 +324,164 @@ def H_tc_needs_squeeze(shared: IdCatEmbedding, node_ids: torch.Tensor) -> bool:
     # If user passes shape (B,) we get (B, C); if (B,1) we get (B,1,C).
     # Handle both robustly.
     return node_ids.ndim == 2 and node_ids.shape[1] == 1
+
+
+# -----------------------------
+# New relation-aware GATv2 encoder and full model wrapper (Colab backbone)
+# -----------------------------
+from typing import Optional, Dict
+import torch
+import torch.nn as nn
+try:
+    from torch_geometric.data import Data
+    from torch_geometric.nn import GATv2Conv, BatchNorm as PygBatchNorm
+except Exception:  # pragma: no cover - allow import in environments without PyG during non-GNN tests
+    Data = object  # type: ignore
+    GATv2Conv = object  # type: ignore
+    class PygBatchNorm(nn.Module):  # minimal stub
+        def __init__(self, dim: int):
+            super().__init__()
+        def forward(self, x):
+            return x
+
+from .backbone import LiquidityResidualBackbone
+
+class GraphEncoder(nn.Module):
+    """
+    Encodes node features with relation-aware GATv2:
+      - Learn an embedding for relation_id
+      - Edge attributes = [rel_emb, scaled edge_weight] with learnable per-relation gain
+      - Optional issuer embedding concatenated to x
+    """
+    def __init__(self,
+                 x_dim: int,
+                 num_relations: int,
+                 d_model: int = 128,
+                 issuer_emb_dim: int = 16,
+                 num_issuers: Optional[int] = None,
+                 heads: int = 4,
+                 rel_emb_dim: int = 16,
+                 dropout: float = 0.1,
+                 rel_init_boost: dict | None = None):
+        super().__init__()
+        self.d_model = d_model
+        self.dropout = nn.Dropout(dropout)
+        self.heads   = heads
+
+        # relation embedding + log gain per relation
+        self.rel_emb = nn.Embedding(num_relations, rel_emb_dim)
+        self.rel_log_gain = nn.Parameter(torch.zeros(num_relations))
+        if rel_init_boost:
+            with torch.no_grad():
+                for rid, gain in rel_init_boost.items():
+                    rid_i = int(rid)
+                    if 0 <= rid_i < num_relations:
+                        self.rel_log_gain[rid_i] = float(torch.log(torch.tensor(gain)))
+
+        # optional issuer embedding
+        self.use_issuer = issuer_emb_dim > 0
+        self.issuer_emb_dim = issuer_emb_dim
+        self._issuer_fixed_card = num_issuers
+        self.issuer_emb: Optional[nn.Embedding] = None
+        if self.use_issuer and (num_issuers is not None):
+            self.issuer_emb = nn.Embedding(num_issuers + 1, issuer_emb_dim)  # +1 for unknown
+
+        in_dim = x_dim + (issuer_emb_dim if self.use_issuer else 0)
+        self.in_proj = nn.Linear(in_dim, d_model)
+        self.in_bn   = PygBatchNorm(d_model)
+
+        edge_dim = rel_emb_dim + 1  # concat([rel_emb, edge_weight])
+        out_per_head = d_model // heads if heads > 0 else d_model
+
+        self.conv1 = GATv2Conv(d_model, out_per_head, heads=heads,
+                               edge_dim=edge_dim, dropout=dropout, add_self_loops=False)
+        self.bn1   = PygBatchNorm(d_model)
+        self.conv2 = GATv2Conv(d_model, out_per_head, heads=heads,
+                               edge_dim=edge_dim, dropout=dropout, add_self_loops=False)
+        self.bn2   = PygBatchNorm(d_model)
+
+    def _edge_attr(self, edge_type: torch.Tensor, edge_weight: Optional[torch.Tensor]) -> torch.Tensor:
+        rel = self.rel_emb(edge_type.long())                  # (E, rel_emb_dim)
+        if edge_weight is None:
+            w = torch.zeros(edge_type.size(0), 1, device=rel.device, dtype=rel.dtype)
+        else:
+            w = edge_weight.view(-1, 1).to(rel.dtype)
+        gain = torch.exp(self.rel_log_gain[edge_type.long()]).unsqueeze(-1)  # (E,1)
+        w = w * gain
+        return torch.cat([rel, w], dim=-1)                    # (E, rel_emb_dim+1)
+
+    def _issuer_embed(self, issuer_index: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if not self.use_issuer:
+            return None
+        if self.issuer_emb is None:
+            assert issuer_index is not None, "issuer_index required to init issuer embedding"
+            num_issuers = int(issuer_index.max().item()) + 1 if issuer_index.numel() > 0 else 1
+            self.issuer_emb = nn.Embedding(num_issuers + 1, self.issuer_emb_dim).to(issuer_index.device)
+        idx = (issuer_index.long() + 1).clamp(min=0, max=self.issuer_emb.num_embeddings - 1)
+        return self.issuer_emb(idx)
+
+    def forward(self,
+                x: torch.Tensor,
+                edge_index: torch.Tensor,
+                edge_type: torch.Tensor,
+                edge_weight: Optional[torch.Tensor] = None,
+                issuer_index: Optional[torch.Tensor] = None) -> torch.Tensor:
+        iss = self._issuer_embed(issuer_index) if self.use_issuer else None
+        x_in = torch.cat([x, iss], dim=-1) if iss is not None else x
+        h = self.in_proj(x_in); h = self.in_bn(h); h = torch.relu(h); h = self.dropout(h)
+
+        ea = self._edge_attr(edge_type, edge_weight)
+        h = self.conv1(h, edge_index, edge_attr=ea); h = self.bn1(h); h = torch.relu(h); h = self.dropout(h)
+        h = self.conv2(h, edge_index, edge_attr=ea); h = self.bn2(h); h = torch.relu(h)
+        return h
+
+class LiquidityModelGAT(nn.Module):
+    """
+    End-to-end portfolio-conditioned residual model:
+      encoder(GraphEncoder) -> LiquidityResidualBackbone -> heads
+    """
+    def __init__(self,
+                 x_dim: int,
+                 num_relations: int,
+                 d_model: int = 128,
+                 issuer_emb_dim: int = 16,
+                 num_issuers: Optional[int] = None,
+                 dropout: float = 0.1,
+                 heads: int = 4,
+                 rel_emb_dim: int = 16,
+                 rel_init_boost: dict | None = None):
+        super().__init__()
+        self.encoder  = GraphEncoder(
+            x_dim, num_relations, d_model,
+            issuer_emb_dim=issuer_emb_dim, num_issuers=num_issuers,
+            heads=heads, rel_emb_dim=rel_emb_dim, dropout=dropout,
+            rel_init_boost=rel_init_boost
+        )
+        self.backbone = LiquidityResidualBackbone(d_model=d_model, n_heads=heads, dropout=dropout)
+
+    # convenience: tensors API
+    def forward_from_tensors(self,
+                             x: torch.Tensor, edge_index: torch.Tensor,
+                             edge_type: torch.Tensor, edge_weight: Optional[torch.Tensor],
+                             target_index: torch.LongTensor,
+                             port_index: torch.LongTensor, port_batch: torch.LongTensor,
+                             port_weight: Optional[torch.Tensor] = None,
+                             issuer_index: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        h = self.encoder(x, edge_index, edge_type, edge_weight=edge_weight, issuer_index=issuer_index)
+        return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight)
+
+    # convenience: PyG Data API
+    def forward_from_data(self,
+                          data: Data,
+                          target_index: torch.LongTensor,
+                          port_index: torch.LongTensor, port_batch: torch.LongTensor,
+                          port_weight: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        h = self.encoder(
+            data.x, data.edge_index, data.edge_type,
+            edge_weight=getattr(data, "edge_weight", None),
+            issuer_index=getattr(data, "issuer_index", None),
+        )
+        return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight)
+
+# Alias for notebooks
+LiquidityModelColab = LiquidityModelGAT

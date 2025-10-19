@@ -52,3 +52,9 @@ market = ["yfinance", "pandas_datareader", "fredapi"]
 # (optional) if you have non-.py files inside ptliq you want included:
 # [tool.setuptools.package-data]
 # ptliq = ["**/*.yaml", "**/*.yml", "**/*.json", "**/*.txt"]
+
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore:.*torch_geometric\\.distributed has been deprecated since 2\\.7\\.0.*:DeprecationWarning:torch_geometric\\.llm\\.utils\\.backend_utils",
+]
