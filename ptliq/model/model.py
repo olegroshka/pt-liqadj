@@ -257,9 +257,11 @@ class PortfolioResidualModel(nn.Module):
         h_t = self.trade_proj(H_t)  # (B, D)
 
         # portfolio items
-        cats_p = self._build_portfolio_cats(port_nodes, node_to_sector)
-        H_pc = self.shared(port_nodes, cats_p)   # (B, T, C)
-        H_p = self.port_proj(H_pc)               # (B, T, D)
+        # Ensure padded positions (-1) don't index tensors; clamp to 0 for safe gathers
+        port_nodes_safe = torch.clamp(port_nodes, min=0)
+        cats_p = self._build_portfolio_cats(port_nodes_safe, node_to_sector)
+        H_pc = self.shared(port_nodes_safe, cats_p)   # (B, T, C)
+        H_p = self.port_proj(H_pc)                    # (B, T, D)
 
         valid_mask = self._make_valid_mask(port_len, T)    # True=valid
 
@@ -269,7 +271,7 @@ class PortfolioResidualModel(nn.Module):
         # feature-aware masked mean (sector match)
         sector_q = batch_cats.get("sector_code", None)
         if sector_q is not None:
-            ctx_masked = self._masked_sector_mean(H_p, valid_mask, port_nodes, node_to_sector, sector_q)
+            ctx_masked = self._masked_sector_mean(H_p, valid_mask, port_nodes_safe, node_to_sector, sector_q)
         else:
             # fallback to valid mean if sector absent
             w = valid_mask.float().unsqueeze(-1)

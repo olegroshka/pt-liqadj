@@ -60,14 +60,19 @@ def _run_split(
     evt = embargo_val_test
 
     if mode == "auto" and n_folds == 0:
-        split = compute_auto_ranges(
-            trades_path,
-            val_days=val_days,
-            test_days=test_days,
-            date_col=date_col,
-            embargo_train_val=etv,
-            embargo_val_test=evt,
-        )
+        try:
+            split = compute_auto_ranges(
+                trades_path,
+                val_days=val_days,
+                test_days=test_days,
+                date_col=date_col,
+                embargo_train_val=etv,
+                embargo_val_test=evt,
+            )
+        except ValueError as e:
+            # Graceful fallback to fixed split if auto sizing is impossible (e.g., too few days)
+            typer.echo(f"Auto mode failed ({e}); falling back to fixed mode using --train-end/--val-end.")
+            split = compute_default_ranges(trades_path, train_end=train_end, val_end=val_end, date_col=date_col)
         path = write_ranges(split, outdir, filename=filename)
         counts = count_rows_in_range(trades_path, split, date_col=date_col)
         typer.echo(f"Wrote {path}  counts: {json.dumps(counts)}")

@@ -32,6 +32,11 @@ def test_validator_catches_bad_values(tmp_path: Path):
     report = validate_raw(tmp_path)
     assert not report["passed"]
     # at least some of the expected failures appear
-    errs = " ".join(report.get("cross_checks", []))
+    cx = report.get("cross_checks")
+    if isinstance(cx, dict):
+        flat = (cx.get("errors", []) or []) + (cx.get("warnings", []) or [])
+    else:
+        flat = cx or []
+    errs = " ".join([str(s) for s in flat])
     assert "unknown isin" in errs.lower()
     assert "non-positive" in errs.lower() or "unexpected side" in errs.lower()

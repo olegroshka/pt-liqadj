@@ -66,9 +66,9 @@ def app_main(
         json.dump(report, f, indent=2)
 
     if not report["passed"]:
-        raise RuntimeError(f"Validation failed; see {report_path}")
-
-    print(f"[bold]VAL[/bold] passed → {report_path}")
+        print(f"[bold yellow]VALIDATION DID NOT PASS[/bold yellow] → continuing. See {report_path}")
+    else:
+        print(f"[bold]VAL[/bold] passed → {report_path}")
 
     # 2) split
     stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")

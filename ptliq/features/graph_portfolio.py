@@ -105,7 +105,17 @@ def build_graph_inputs(
     }
     nums = torch.cat([f["nums"] for f in frames], dim=0)
     size_side_urg = torch.cat([f["size_side_urg"] for f in frames], dim=0)
-    port_nodes = torch.cat([f["port_nodes"] for f in frames], dim=0)
+    # Pad port_nodes to common width across dates for safe concatenation
+    max_T = max(int(fr["port_nodes"].shape[1]) for fr in frames) if frames else 0
+    padded_port_nodes = []
+    for fr in frames:
+        pn = fr["port_nodes"]
+        T = int(pn.shape[1])
+        if T < max_T:
+            pad = torch.full((pn.shape[0], max_T - T), -1, dtype=pn.dtype)
+            pn = torch.cat([pn, pad], dim=1)
+        padded_port_nodes.append(pn)
+    port_nodes = torch.cat(padded_port_nodes, dim=0) if frames else torch.empty((0, max_T), dtype=torch.long)
     port_len = torch.cat([f["port_len"] for f in frames], dim=0)
     y = torch.cat([f["y"] for f in frames], dim=0)
 

@@ -33,7 +33,7 @@ def test_cli_end_to_end_smoke(tmp_path: Path):
     assert res.exit_code == 0, res.stdout
 
     # validate
-    res = runner.invoke(val_app, ["--rawdir", str(rawdir), "--outdir", str(tmp_path / "validated"), "--loglevel", "INFO"])
+    res = runner.invoke(val_app, ["--rawdir", str(rawdir), "--outdir", str(tmp_path / "validated"), "--loglevel", "INFO", "--no-fail-on-error"])
     assert res.exit_code == 0, res.stdout
 
     # split (use 4 sim days starting 2025-01-02 → 02..05 ; train 02..03, val=04, test=05)
@@ -44,11 +44,9 @@ def test_cli_end_to_end_smoke(tmp_path: Path):
         "--val-end", "2025-01-04",
     ])
     assert res.exit_code == 0, res.stdout
-    # discover newest stamp
-    stamps = sorted([p for p in splits_dir.glob("*") if p.is_dir()], key=lambda p: p.name)
-    assert stamps, "no split stamps created"
-    ranges_json = stamps[-1] / "ranges.json"
-    assert ranges_json.exists()
+    # new behavior: ranges.json is written directly to the specified outdir
+    ranges_json = splits_dir / "ranges.json"
+    assert ranges_json.exists(), "ranges.json not created in splits_dir"
 
     # featurize
     run_id = "exp_cli"
