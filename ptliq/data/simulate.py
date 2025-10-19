@@ -19,6 +19,12 @@ import random
 import numpy as np
 import pandas as pd
 
+# Optional progress bar for console
+try:
+    from tqdm.auto import tqdm  # type: ignore
+except Exception:  # pragma: no cover - tqdm is optional
+    tqdm = None  # type: ignore
+
 # Try to reuse project seeding if present
 try:
     from ptliq.utils.randomness import set_seed as _project_set_seed  # type: ignore
@@ -108,6 +114,16 @@ CURVE_BUCKETS_FINE = ["0-3y", "3-5y", "5-7y", "7-10y", "10-15y"]
 DAY_COUNTS = ["30/360", "ACT/ACT"]
 FREQ_CHOICES = [1, 2, 2, 2, 4]  # weighted random (mostly semi-annual)
 CURRENCIES = ["USD", "EUR", "GBP"]
+
+
+def _progress(iterable, desc: Optional[str] = None, total: Optional[int] = None):
+    """Wrap an iterable with tqdm if available, otherwise return as-is."""
+    if tqdm is None:
+        return iterable
+    try:
+        return tqdm(iterable, desc=desc, total=total)
+    except Exception:
+        return iterable
 
 
 # --------------------------------------------------------------------------------------
@@ -417,7 +433,7 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
 
     trades_rows = []
 
-    for d in range(n_days):
+    for d in _progress(range(n_days), desc="Simulating days", total=n_days):
         trade_date = (start + timedelta(days=int(d))).date()
 
         # how many times each bond trades today
