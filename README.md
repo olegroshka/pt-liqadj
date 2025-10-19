@@ -56,7 +56,7 @@ ptliq-exp --config configs/exp_gnn_vs_baseline.yaml --workdir .
 * `ptliq-validate` – check schema/consistency of raw tables.
 * `ptliq-split` – create train/val/test date ranges.
 * `ptliq-feat` – build per-trade feature parquet files.
-* `ptliq-train` – train baseline model.
+* `ptliq-train-baseline` – train baseline model.
 * `ptliq-eval` – evaluate a trained baseline model on features.
 * `ptliq-report` – render report graphics/HTML from backtest outputs.
 
