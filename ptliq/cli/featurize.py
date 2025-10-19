@@ -100,6 +100,57 @@ def _print_relation_counts(tag: str, edges_df: pd.DataFrame) -> None:
         for r, c in vc.sort_index().items():
             typer.echo(f"  {r:<14} {int(c)}")
 
+# --- NEW: portfolio line-item weights (per portfolio_id, trade_dt) ---
+def _compute_portfolio_weights(trades: pd.DataFrame, node_id_map: dict) -> pd.DataFrame:
+    t = trades.copy()
+    _require_cols(t, ["isin", "dv01_dollar", "side", "trade_dt", "portfolio_id"], "trades/portfolio-weights")
+    # normalize date + clean ids
+    t["trade_dt"] = pd.to_datetime(t["trade_dt"], errors="coerce").dt.normalize()
+    t["portfolio_id"] = t["portfolio_id"].replace(["", "None", "nan", "NaN"], np.nan)
+    t = t.dropna(subset=["portfolio_id", "trade_dt", "isin", "dv01_dollar", "side"]).copy()
+
+    # sign convention == COTRADE (BUY/CBUY=+1, SELL/CSELL=-1) for consistency
+    t["sign"] = (
+        t["side"].astype(str).str.upper()
+         .map({"CBUY": 1.0, "BUY": 1.0, "CSELL": -1.0, "SELL": -1.0})
+         .fillna(0.0)
+    )
+
+    # per-basket sums and ranks
+    key = ["portfolio_id", "trade_dt"]
+    t["dv01_abs"] = t["dv01_dollar"].astype(float).abs()
+    denom = t.groupby(key)["dv01_abs"].transform("sum").replace(0.0, np.nan)
+    t["w_dv01_abs_frac"] = (t["dv01_abs"] / denom).fillna(0.0).clip(0.0, 1.0)
+    # ranks (1 = largest |DV01|) — compute within group safely
+    t["rank_dv01_desc"] = t.groupby(key)["dv01_abs"].rank(ascending=False, method="min")
+    n_in_group = t.groupby(key)["isin"].transform("size")
+    t["rank_pct"] = ((t["rank_dv01_desc"] - 1) / (n_in_group - 1)).fillna(0.0)
+
+    # signed fraction using same sign convention as COTRADE
+    t["w_dv01_signed_frac"] = t["w_dv01_abs_frac"] * t["sign"]
+
+    # keep only baskets with at least 2 lines (eligible portfolios)
+    t = t[n_in_group >= 2].copy()
+
+    # attach node ids (drop orphan ISINs if any)
+    t["node_id"] = t["isin"].map(node_id_map)
+    t = t.dropna(subset=["node_id"]).copy()
+    t["node_id"] = t["node_id"].astype(int)
+
+    # stable group id for downstream (int)
+    t = t.sort_values(key + ["node_id"]).reset_index(drop=True)
+    gid_map = {k: i for i, k in enumerate(sorted(t[key].drop_duplicates().itertuples(index=False, name=None)))}
+    t["pf_gid"] = t[key].apply(tuple, axis=1).map(gid_map).astype(np.int32)
+
+    keep_cols = [
+        "pf_gid", "portfolio_id", "trade_dt",
+        "isin", "node_id",
+        "w_dv01_abs_frac", "w_dv01_signed_frac",
+        "rank_dv01_desc", "rank_pct",
+        "dv01_abs"
+    ]
+    return t[keep_cols]
+
 # -----------------------
 # Pair constructors
 # -----------------------
@@ -288,6 +339,34 @@ def featurize_graph(
         nodes["currency"] = np.nan
 
     node_id_map = dict(zip(nodes["isin"], nodes["node_id"]))
+
+    # --- NEW: compute and save portfolio line-item weights and group index ---
+    try:
+        port_lines = _compute_portfolio_weights(tdf, node_id_map)
+    except Exception as e:
+        raise
+    if port_lines.empty:
+        raise typer.BadParameter("[portfolio-weights] found no eligible (portfolio_id, trade_dt) groups (>=2).")
+
+    # Integrity checks: unit-sum per group, bounds, no NaNs
+    sum_per_g = port_lines.groupby("pf_gid")["w_dv01_abs_frac"].sum()
+    if not np.allclose(sum_per_g.to_numpy(), 1.0, atol=1e-6):
+        bad = sum_per_g[(sum_per_g - 1.0).abs() > 1e-6]
+        raise typer.BadParameter(f"[portfolio-weights] unit-sum check failed for groups: {bad.index.tolist()} values={bad.values.tolist()}")
+    if port_lines[["w_dv01_abs_frac"]].isna().any().any() or (port_lines["w_dv01_abs_frac"] < 0).any() or (port_lines["w_dv01_abs_frac"] > 1).any():
+        raise typer.BadParameter("[portfolio-weights] invalid weights: NaNs or out-of-bounds [0,1].")
+
+    port_groups = (
+        port_lines.groupby(["pf_gid","portfolio_id","trade_dt"], as_index=False)
+        .agg(n_lines=("node_id","size"), sum_dv01_abs=("dv01_abs","sum"))
+        .assign(sum_w_abs=lambda df: 1.0)
+    )
+
+    p_lines_path  = outdir / "portfolio_lines.parquet"
+    p_groups_path = outdir / "portfolio_groups.parquet"
+    port_lines.to_parquet(p_lines_path, index=False)
+    port_groups.to_parquet(p_groups_path, index=False)
+    typer.echo(f"Saved portfolio context:\n - {p_lines_path}\n - {p_groups_path}")
 
     issuer_edges = _make_pairs_from_groups(nodes, "issuer", "ISSUER_SIBLING", 1.00)
     sector_edges = _make_pairs_from_groups(nodes, "sector_id", "SECTOR", 0.25, different_issuer_only=True)
@@ -516,6 +595,48 @@ def featurize_pyg(
             "num_edges_directed": int(edge_index.shape[1]),
         },
     }
+    # --- NEW: optional portfolio context packing (ragged tensors) ---
+    p_lines_path = graph_dir / "portfolio_lines.parquet"
+    if p_lines_path.exists():
+        pl = pd.read_parquet(p_lines_path)
+        if {"pf_gid","node_id","w_dv01_abs_frac","w_dv01_signed_frac"}.issubset(pl.columns) and len(pl) > 0:
+            pl = pl.sort_values(["pf_gid","rank_dv01_desc","node_id"]).reset_index(drop=True)
+            grp = pl.groupby("pf_gid", sort=True, as_index=False)
+            lengths = grp.size()["size"].astype(np.int64).to_numpy()
+            offsets = np.concatenate([[0], np.cumsum(lengths)[:-1]])
+
+            port_nodes_flat  = torch.as_tensor(pl["node_id"].to_numpy(np.int64, copy=False))
+            port_w_abs_flat  = torch.as_tensor(pl["w_dv01_abs_frac"].to_numpy(np.float32, copy=False))
+            port_w_sgn_flat  = torch.as_tensor(pl["w_dv01_signed_frac"].to_numpy(np.float32, copy=False))
+            port_len         = torch.as_tensor(lengths, dtype=torch.long)
+            port_offsets     = torch.as_tensor(offsets, dtype=torch.long)
+
+            port_ctx = {
+                "port_nodes_flat": port_nodes_flat.contiguous(),
+                "port_w_abs_flat": port_w_abs_flat.contiguous(),
+                "port_w_signed_flat": port_w_sgn_flat.contiguous(),
+                "port_len": port_len.contiguous(),
+                "port_offsets": port_offsets.contiguous(),
+            }
+            torch.save(port_ctx, outdir / "portfolio_context.pt")
+
+            p_index = (pl[["pf_gid","portfolio_id","trade_dt"]].drop_duplicates()
+                       .sort_values("pf_gid").reset_index(drop=True))
+            p_index.to_parquet(outdir / "portfolio_index.parquet", index=False)
+
+            meta["portfolio_context"] = {
+                "num_groups": int(len(port_len)),
+                "total_lines": int(int(port_len.sum())),
+                "tensors": ["port_nodes_flat","port_w_abs_flat","port_w_signed_flat","port_len","port_offsets"],
+                "index_file": "portfolio_index.parquet",
+                "weight_fields": ["w_dv01_abs_frac","w_dv01_signed_frac"],
+                "signed_sign_convention": "BUY=+1, SELL=-1 (matches COTRADE)",
+            }
+        else:
+            typer.echo("[pyg] portfolio_lines.parquet present but missing required columns; skipping.", err=True)
+    else:
+        typer.echo("[pyg] no portfolio_lines.parquet found; skipping portfolio context packing.")
+
     (outdir / "feature_meta.json").write_text(json.dumps(meta, indent=2))
     typer.echo(f"Saved:\n - {outdir/'pyg_graph.pt'}\n - {outdir/'feature_meta.json'}")
 
