@@ -100,6 +100,56 @@ def _print_relation_counts(tag: str, edges_df: pd.DataFrame) -> None:
         for r, c in vc.sort_index().items():
             typer.echo(f"  {r:<14} {int(c)}")
 
+# --- Market helpers: robust loaders and calendar alignment ---
+
+def _load_series(path: Path, date_candidates=("date","asof_date","trade_date","ts"),
+                 value_candidates=("value","close","oas","oas_bps","MOVE","VIX")) -> pd.DataFrame:
+    """
+    Returns DataFrame[asof_date (date), value (float)].
+    Fail-fast if no usable cols or empty after cleaning.
+    """
+    df = pd.read_parquet(path)
+    dcol = next((c for c in date_candidates if c in df.columns), None)
+    vcol = next((c for c in value_candidates if c in df.columns), None)
+    if not dcol or not vcol:
+        raise typer.BadParameter(f"[market] expected a date col in {date_candidates} and value col in {value_candidates} for {path}")
+    out = df[[dcol, vcol]].rename(columns={dcol: "asof_date", vcol: "value"})
+    out["asof_date"] = pd.to_datetime(out["asof_date"], errors="coerce").dt.normalize().dt.date
+    out = out.dropna(subset=["asof_date","value"]).copy()
+    if out.empty:
+        raise typer.BadParameter(f"[market] empty after cleaning: {path}")
+    return out
+
+
+def _align_calendar(trades: pd.DataFrame, sers: dict[str,pd.DataFrame], ffill_limit: int = 3) -> pd.DataFrame:
+    """
+    Build a business-day calendar covering all trade_dt in trades, align and limited forward-fill.
+    Returns a single DataFrame indexed by asof_date with columns named after the keys in `sers`.
+    """
+    cal = pd.to_datetime(trades["trade_dt"]).dt.normalize().dt.date
+    idx = pd.Index(sorted(pd.Series(cal).dropna().unique()), name="asof_date")
+    out = pd.DataFrame(index=idx)
+    for name, df in sers.items():
+        x = (df.set_index("asof_date").sort_index()
+               .reindex(idx).astype(float)
+               .ffill(limit=ffill_limit))
+        if x.isna().any().any():
+            missing = int(x["value"].isna().sum()) if "value" in x.columns else int(x.isna().sum().sum())
+            raise typer.BadParameter(f"[market] missing {missing} values for {name} after limited ffill; increase limit or fix source.")
+        out[name] = x["value"].values if "value" in x.columns else x.iloc[:,0].values
+    out = out.reset_index()
+    return out
+
+
+def _with_derived(df: pd.DataFrame, col: str, win: int = 20) -> pd.DataFrame:
+    s = pd.Series(df[col].astype(float).values)
+    df[f"{col}_chg_1d"] = s.diff(1)
+    df[f"{col}_chg_5d"] = s.diff(5)
+    roll = s.rolling(win, min_periods=max(5, win//4))
+    mu = roll.mean(); sd = roll.std().replace(0.0, np.nan)
+    df[f"{col}_z_{win}d"] = (s - mu) / (sd + 1e-8)
+    return df
+
 # --- NEW: portfolio line-item weights (per portfolio_id, trade_dt) ---
 def _compute_portfolio_weights(trades: pd.DataFrame, node_id_map: dict) -> pd.DataFrame:
     t = trades.copy()
@@ -367,6 +417,58 @@ def featurize_graph(
     port_lines.to_parquet(p_lines_path, index=False)
     port_groups.to_parquet(p_groups_path, index=False)
     typer.echo(f"Saved portfolio context:\n - {p_lines_path}\n - {p_groups_path}")
+
+    # --- NEW: market features (MOVE / IG-OAS / HY-OAS / VIX) ---
+    try:
+        market_dir = Path("data/raw")
+        move_p = market_dir / "move.parquet"
+        ig_p   = market_dir / "ig_oas.parquet"
+        hy_p   = market_dir / "hy_oas.parquet"
+        vix_p  = market_dir / "vix.parquet"
+        for p in [move_p, ig_p, hy_p, vix_p]:
+            if not p.exists():
+                raise typer.BadParameter(f"[market] missing file: {p}")
+
+        move = _load_series(move_p, value_candidates=("value","MOVE","close"))
+        ig   = _load_series(ig_p,   value_candidates=("oas_bps","value","close"))
+        hy   = _load_series(hy_p,   value_candidates=("oas_bps","value","close"))
+        vix  = _load_series(vix_p,  value_candidates=("value","VIX","close"))
+
+        aligned = _align_calendar(tdf, {
+            "MOVE_lvl": move,
+            "IG_OAS_bps": ig,
+            "HY_OAS_bps": hy,
+            "VIX_lvl": vix,
+        })
+
+        aligned = _with_derived(aligned, "MOVE_lvl", win=20)
+        aligned = _with_derived(aligned, "VIX_lvl",  win=20)
+        aligned["HYIG_spread_bps"]  = aligned["HY_OAS_bps"] - aligned["IG_OAS_bps"]
+        aligned["IG_OAS_chg_5d"]    = aligned["IG_OAS_bps"].astype(float).diff(5)
+        aligned["HY_OAS_chg_5d"]    = aligned["HY_OAS_bps"].astype(float).diff(5)
+        aligned["HYIG_chg_5d"]      = aligned["HYIG_spread_bps"].astype(float).diff(5)
+
+        aligned = aligned.fillna(0.0)
+
+        # sanity checks
+        if aligned.isna().any().any():
+            raise typer.BadParameter("[market] NaNs remain in market features after fills/derivatives.")
+
+        mkt_path = outdir / "market_features.parquet"
+        meta_path = outdir / "market_meta.json"
+        aligned.to_parquet(mkt_path, index=False)
+
+        mkt_meta = {
+            "asof_key": "asof_date",
+            "raw_files": ["move.parquet","ig_oas.parquet","hy_oas.parquet","vix.parquet"],
+            "feature_names": [c for c in aligned.columns if c != "asof_date"],
+            "ffill_limit_days": 3,
+            "rolling_windows": {"MOVE_z_20d": 20, "VIX_z_20d": 20},
+        }
+        meta_path.write_text(json.dumps(mkt_meta, indent=2))
+        typer.echo(f"Saved market features: {mkt_path}")
+    except Exception as e:
+        raise
 
     issuer_edges = _make_pairs_from_groups(nodes, "issuer", "ISSUER_SIBLING", 1.00)
     sector_edges = _make_pairs_from_groups(nodes, "sector_id", "SECTOR", 0.25, different_issuer_only=True)
@@ -636,6 +738,36 @@ def featurize_pyg(
             typer.echo("[pyg] portfolio_lines.parquet present but missing required columns; skipping.", err=True)
     else:
         typer.echo("[pyg] no portfolio_lines.parquet found; skipping portfolio context packing.")
+
+    # --- NEW: pack market context (date-indexed) ---
+    mkt_path = graph_dir / "market_features.parquet"
+    if mkt_path.exists():
+        mkt = pd.read_parquet(mkt_path).copy()
+        if "asof_date" not in mkt.columns:
+            raise typer.BadParameter("[pyg] market_features.parquet missing 'asof_date'")
+        mkt["asof_date"] = pd.to_datetime(mkt["asof_date"], errors="coerce").dt.normalize().dt.date
+        mkt = mkt.dropna(subset=["asof_date"]).sort_values("asof_date").reset_index(drop=True)
+
+        feat_cols = [c for c in mkt.columns if c != "asof_date"]
+        mkt_dates = torch.as_tensor(pd.to_datetime(mkt["asof_date"]).astype("int64").to_numpy(), dtype=torch.long)
+        mkt_feat  = torch.as_tensor(mkt[feat_cols].to_numpy(np.float32, copy=False))
+
+        market_ctx = {"mkt_dates": mkt_dates.contiguous(), "mkt_feat": mkt_feat.contiguous()}
+        torch.save(market_ctx, outdir / "market_context.pt")
+
+        idx = (mkt.assign(row_idx=lambda df: np.arange(len(df), dtype=np.int64))[ ["asof_date","row_idx"] ])
+        idx.to_parquet(outdir / "market_index.parquet", index=False)
+
+        meta["market_context"] = {
+            "num_days": int(len(mkt_dates)),
+            "num_features": int(mkt_feat.size(1)),
+            "feature_names": feat_cols,
+            "index_file": "market_index.parquet",
+        }
+        (outdir / "feature_meta.json").write_text(json.dumps(meta, indent=2))
+        typer.echo(f"Saved market context: {outdir/'market_context.pt'}")
+    else:
+        typer.echo("[pyg] market_features.parquet not found; skipping market context.")
 
     (outdir / "feature_meta.json").write_text(json.dumps(meta, indent=2))
     typer.echo(f"Saved:\n - {outdir/'pyg_graph.pt'}\n - {outdir/'feature_meta.json'}")
