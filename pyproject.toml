@@ -40,12 +40,8 @@ ptliq-hy-oas = "ptliq.cli.hy_oas:app"
 ptliq-vix = "ptliq.cli.vix:app"
 
 ptliq-gat-train = "ptliq.cli.gat_train:app"
-# Backward-compatible misspelled alias
-ptliq-start-tensor-bord = "ptliq.cli.tensorboard:app"
-# Correct spellings/aliases
 ptliq-start-tensorboard = "ptliq.cli.tensorboard:app"
-ptliq-tensorboard = "ptliq.cli.tensorboard:app"
-ptliq-stop-tensor-bord = "ptliq.cli.tensorboard_stop:app"
+ptliq-stop-tensorbord = "ptliq.cli.tensorboard_stop:app"
 
 
 [tool.setuptools.packages.find]
