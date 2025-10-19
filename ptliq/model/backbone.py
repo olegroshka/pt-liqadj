@@ -146,9 +146,27 @@ class LiquidityResidualBackbone(nn.Module):
         port_batch: torch.LongTensor,            # (T,) in [0..B-1]
         port_weight: torch.Tensor | None = None  # (T,)
     ) -> Dict[str, torch.Tensor]:
-        B = target_index.numel()
+        B = int(target_index.numel())
         d = node_embeddings.size(-1)
         device = node_embeddings.device
+
+        # validations
+        assert port_index.numel() == port_batch.numel(), (
+            f"port_index({port_index.shape}) and port_batch({port_batch.shape}) must align"
+        )
+        if port_weight is not None:
+            assert port_weight.numel() == port_index.numel(), (
+                f"port_weight({port_weight.shape}) must match port_index({port_index.shape})"
+            )
+        if port_index.numel() > 0:
+            max_pi = int(port_index.max().item())
+            min_pi = int(port_index.min().item())
+            assert 0 <= min_pi and max_pi < node_embeddings.size(0), "port_index out of range for node_embeddings"
+        max_ti = int(target_index.max().item()) if target_index.numel() > 0 else -1
+        min_ti = int(target_index.min().item()) if target_index.numel() > 0 else 0
+        assert target_index.numel() == 0 or (0 <= min_ti and max_ti < node_embeddings.size(0)), (
+            "target_index out of range for node_embeddings"
+        )
 
         targets  = node_embeddings[target_index]                  # (B,d)
         contexts = torch.zeros(B, d, device=device)

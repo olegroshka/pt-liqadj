@@ -391,7 +391,10 @@ class GraphEncoder(nn.Module):
         self.in_bn   = PygBatchNorm(d_model)
 
         edge_dim = rel_emb_dim + 1  # concat([rel_emb, edge_weight])
-        out_per_head = d_model // heads if heads > 0 else d_model
+        # Ensure GAT output matches BatchNorm size exactly
+        assert heads > 0, "heads must be a positive integer"
+        assert d_model % heads == 0, f"d_model={d_model} must be divisible by heads={heads}"
+        out_per_head = d_model // heads
 
         self.conv1 = GATv2Conv(d_model, out_per_head, heads=heads,
                                edge_dim=edge_dim, dropout=dropout, add_self_loops=False)
