@@ -280,11 +280,15 @@ def build_dataset(
             else {},
         }
 
-    # splits
-    splits = _try_load_index_lists(splits_dir) or _try_load_ranges(splits_dir, tdf) or _fallback_split(tdf)
+    # splits (fail-fast: require provided splits; no synthetic fallback)
+    splits = _try_load_index_lists(splits_dir) or _try_load_ranges(splits_dir, tdf)
+    if not splits:
+        raise typer.BadParameter(
+            "[splits] not found. Provide {train,val,test}.json index lists or ranges.json|yaml created with ptliq-split."
+        )
     idx_tr, idx_va, idx_te = splits
     if any(len(x) == 0 for x in (idx_tr, idx_va, idx_te)):
-        idx_tr, idx_va, idx_te = _fallback_split(tdf)
+        raise typer.BadParameter("[splits] one of the splits is empty after applying your ranges/index files.")
 
     # warn if constant target
     def _warn_constant(name, idx):
@@ -313,3 +317,10 @@ def build_dataset(
     torch.save(gi_te, outdir / "test.pt")
 
     typer.echo("Wrote bundles to " + str(outdir))
+
+
+# expose Typer app for importers
+app = app
+
+if __name__ == "__main__":
+    app()

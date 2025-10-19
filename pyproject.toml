@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pt-liqadj"
 version = "0.1.0"
-dependencies = ["pydantic", "pyarrow", "pandas", "numpy", "pyyaml", "typer", "rich", "torch", "fastapi", "uvicorn"]
+dependencies = ["pydantic", "pyarrow", "pandas", "numpy", "pyyaml", "typer", "rich", "torch", "torch-geometric", "fastapi", "uvicorn"]
 
 [project.scripts]
 ptliq-simulate = "ptliq.cli.simulate:app"
