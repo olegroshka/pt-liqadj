@@ -342,11 +342,13 @@ def eval_epoch(model: LiquidityModelGAT, data: Data, loader: DataLoader, device:
 
     y = torch.cat(ys)
     m = torch.cat(preds_m); q5 = torch.cat(preds50); q9 = torch.cat(preds90)
-    mae = (m - y).abs().mean().item()
+    err = (m - y)
+    mae = err.abs().mean().item()
+    rmse = float(torch.sqrt((err * err).mean()).item())
     cov50 = (y <= q5).float().mean().item()
     cov90 = (y <= q9).float().mean().item()
     w = (q9 - q5)
-    return dict(mae=mae, cov50=cov50, cov90=cov90, width_mean=w.mean().item(), width_std=w.std(unbiased=False).item())
+    return dict(mae=mae, rmse=rmse, cov50=cov50, cov90=cov90, width_mean=w.mean().item(), width_std=w.std(unbiased=False).item())
 
 # ---------------------------
 # Orchestrator
@@ -425,7 +427,7 @@ def train_gat(
     # opt/sched
     opt = torch.optim.AdamW(model.parameters(), lr=_safe_float(run_cfg.train.lr, 1e-3),
                             weight_decay=_safe_float(run_cfg.train.weight_decay, 1e-4))
-    best = float("inf"); best_ep = -1; patience_left = int(run_cfg.train.patience)
+    best = float("inf"); best_rmse = float("inf"); best_ep = -1; patience_left = int(run_cfg.train.patience)
 
     outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
     (outdir / "progress.jsonl").touch()
@@ -458,7 +460,7 @@ def train_gat(
     global_step = 0
     for ep in range(1, int(run_cfg.train.max_epochs) + 1):
         model.train()
-        ep_loss = ep_mae = 0.0; nobs = 0
+        ep_loss = ep_mae = ep_mse = 0.0; nobs = 0
 
         iterable = train_loader
         if tqdm is not None:
@@ -486,9 +488,12 @@ def train_gat(
 
             B = int(tgt.numel())
             with torch.no_grad():
-                mae = (out["delta_mean"].flatten() - r).abs().mean()
+                err = (out["delta_mean"].flatten() - r)
+                mae = err.abs().mean()
+                mse = (err * err).mean()
             ep_loss += float(losses["total"].item()) * B
             ep_mae  += float(mae.item()) * B
+            ep_mse  += float(mse.item()) * B
             nobs    += B
 
             # TensorBoard step logging
@@ -513,8 +518,10 @@ def train_gat(
 
         # end epoch: eval
         train_mae = ep_mae / max(1, nobs)
+        train_rmse = float(np.sqrt(ep_mse / max(1, nobs)))
         val_metrics = eval_epoch(model, data, val_loader, dev)
-        val_mae = val_metrics["mae"]
+        val_mae = float(val_metrics["mae"])
+        val_rmse = float(val_metrics.get("rmse", float("nan")))
 
         # log (file)
         with (outdir / "progress.jsonl").open("a", encoding="utf-8") as f:
@@ -528,7 +535,9 @@ def train_gat(
         if writer is not None:
             try:
                 writer.add_scalar("epoch/train_mae", float(train_mae), ep)
+                writer.add_scalar("epoch/train_rmse", float(train_rmse), ep)
                 writer.add_scalar("epoch/val_mae", float(val_mae), ep)
+                writer.add_scalar("epoch/val_rmse", float(val_rmse), ep)
                 writer.add_scalar("epoch/val_cov50", float(val_metrics["cov50"]), ep)
                 writer.add_scalar("epoch/val_cov90", float(val_metrics["cov90"]), ep)
                 writer.add_scalar("epoch/val_width_mean", float(val_metrics["width_mean"]), ep)
@@ -542,24 +551,24 @@ def train_gat(
             except Exception:
                 pass
 
-        print(f"Epoch {ep:02d} | train_mae={train_mae:.4f} | val_mae={val_mae:.4f} | cov50={val_metrics['cov50']:.3f} "
+        print(f"Epoch {ep:02d} | train_mae={train_mae:.4f} | train_rmse={train_rmse:.4f} | val_mae={val_mae:.4f} | val_rmse={val_rmse:.4f} | cov50={val_metrics['cov50']:.3f} "
               f"| cov90={val_metrics['cov90']:.3f} | width={val_metrics['width_mean']:.3f}±{val_metrics['width_std']:.3f}")
 
         # early stop
         if val_mae + 1e-8 < best:
-            best = val_mae; best_ep = ep; patience_left = int(run_cfg.train.patience)
+            best = val_mae; best_rmse = val_rmse; best_ep = ep; patience_left = int(run_cfg.train.patience)
             ckpt = {
                 "arch": {"type": "liquidity_model_gat",
                          "x_dim": int(data.x.size(1)),
                          "num_relations": num_rel,
                          "model": asdict(run_cfg.model)},
                 "state_dict": model.state_dict(),
-                "best": {"epoch": best_ep, "val_mae": float(best)},
+                "best": {"epoch": best_ep, "val_mae": float(best), "val_rmse": float(val_rmse)},
                 "train_config": asdict(run_cfg.train),
             }
             torch.save(ckpt, outdir / "ckpt_liquidity.pt")
             torch.save(ckpt, outdir / "ckpt.pt")
-            (outdir / "metrics_val.json").write_text(json.dumps({"best_epoch": best_ep, "best_val_mae_bps": float(best)}, indent=2))
+            (outdir / "metrics_val.json").write_text(json.dumps({"best_epoch": best_ep, "best_val_mae_bps": float(best), "best_val_rmse_bps": float(val_rmse)}, indent=2))
             # lightweight calibration snapshot
             with open(outdir / "calibration.json", "w", encoding="utf-8") as jf:
                 jf.write(json.dumps({
@@ -583,7 +592,7 @@ def train_gat(
             writer.close()
         except Exception:
             pass
-    return {"best_epoch": best_ep, "best_val_mae_bps": float(best)}
+    return {"best_epoch": best_ep, "best_val_mae_bps": float(best), "best_val_rmse_bps": float(best_rmse)}
 
 # Backward-compatible alias if other modules still import the old name
 train_liquidity = train_gat

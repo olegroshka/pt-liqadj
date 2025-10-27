@@ -235,6 +235,9 @@ def _to_dev(batch: Dict[str, Any], dev: torch.device) -> Dict[str, Any]:
 def _mae(y: torch.Tensor, yhat: torch.Tensor) -> torch.Tensor:
     return torch.mean(torch.abs(y - yhat))
 
+def _rmse(y: torch.Tensor, yhat: torch.Tensor) -> torch.Tensor:
+    return torch.sqrt(torch.mean((y - yhat) ** 2))
+
 # ---------------------------------------------------------------------
 # Checkpoint metadata: serialize to pure primitives (safe for weights_only loads)
 # ---------------------------------------------------------------------
@@ -334,7 +337,7 @@ def train_gnn(
 
     best_val = float("inf")
     best_epoch = -1
-    history: Dict[str, list[float]] = {"val_mae_bps": [], "train_mae_bps": []}
+    history: Dict[str, list[float]] = {"val_mae_bps": [], "train_mae_bps": [], "val_rmse_bps": [], "train_rmse_bps": []}
     patience_left = int(cfg.patience)
 
     n_train = int(train_gi.node_ids.shape[0])
@@ -360,11 +363,12 @@ def train_gnn(
 
         return pn, pl
 
-    def _eval_split(gi: GraphInputs) -> float:
+    def _eval_split(gi: GraphInputs) -> Dict[str, float]:
         model.eval()
         with torch.no_grad():
             N = int(gi.node_ids.shape[0])
-            tot = 0.0
+            tot_mae = 0.0
+            tot_mse = 0.0
             cnt = 0
             for start in range(0, N, bs):
                 end = min(start + bs, N)
@@ -394,10 +398,15 @@ def train_gnn(
                 y_true = b["y"]
                 if y_true.dim() > 1 and y_true.shape[-1] == 1:
                     y_true = y_true.squeeze(-1)
-                mae = _mae(y_true, yhat)
-                tot += float(mae.item()) * (end - start)
+                err = (y_true - yhat)
+                mae = torch.mean(torch.abs(err)).item()
+                mse = torch.mean(err * err).item()
+                tot_mae += float(mae) * (end - start)
+                tot_mse += float(mse) * (end - start)
                 cnt += (end - start)
-            return tot / max(cnt, 1)
+            mean_mae = tot_mae / max(cnt, 1)
+            mean_rmse = float(np.sqrt(tot_mse / max(cnt, 1)))
+            return {"mae": mean_mae, "rmse": mean_rmse}
 
     for epoch in range(int(cfg.max_epochs)):
         model.train()
@@ -449,17 +458,30 @@ def train_gnn(
             n_seen += (end - start)
 
         train_mae = running_mae / max(n_seen, 1)
-        val_mae = _eval_split(val_gi)
+        avg_loss = running_loss / max(n_seen, 1)
+        train_rmse = float(np.sqrt(avg_loss))
+        val_metrics = _eval_split(val_gi)
+        val_mae = float(val_metrics["mae"])
+        val_rmse = float(val_metrics["rmse"])
         history["train_mae_bps"].append(train_mae)
         history["val_mae_bps"].append(val_mae)
+        history["train_rmse_bps"].append(train_rmse)
+        history["val_rmse_bps"].append(val_rmse)
 
-        avg_loss = running_loss / max(n_seen, 1)
         LOG.info(
-            "Epoch %3d/%d | train_mae=%.4f | val_mae=%.4f | loss=%.4f",
-            epoch + 1, int(cfg.max_epochs), train_mae, val_mae, avg_loss
+            "Epoch %3d/%d | train_mae=%.4f | train_rmse=%.4f | val_mae=%.4f | val_rmse=%.4f | loss=%.4f",
+            epoch + 1, int(cfg.max_epochs), train_mae, train_rmse, val_mae, val_rmse, avg_loss
         )
         with (outdir / "progress.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"epoch": epoch + 1, "baseline_mae": baseline_mae, "train_mae": train_mae, "val_mae": val_mae, "avg_loss": avg_loss}) + "\n")
+            f.write(json.dumps({
+                "epoch": epoch + 1,
+                "baseline_mae": baseline_mae,
+                "train_mae": train_mae,
+                "train_rmse": train_rmse,
+                "val_mae": val_mae,
+                "val_rmse": val_rmse,
+                "avg_loss": avg_loss
+            }) + "\n")
 
         improved = val_mae + 1e-8 < best_val
         if improved:
@@ -469,13 +491,13 @@ def train_gnn(
             ckpt = {
                 "arch": arch_meta,                                  # pure primitives
                 "state_dict": model.state_dict(),
-                "best": {"best_epoch": best_epoch, "best_val_mae_bps": float(best_val), "history": history},
+                "best": {"best_epoch": best_epoch, "best_val_mae_bps": float(best_val), "best_val_rmse_bps": float(val_rmse), "history": history},
                 "train_config": asdict(cfg),
             }
             torch.save(ckpt, outdir / "ckpt_gnn.pt")
             torch.save(ckpt, outdir / "ckpt.pt")
             (outdir / "metrics_val.json").write_text(json.dumps(ckpt["best"], indent=2))
-            LOG.info("New best at epoch %d (val_mae=%.4f). Checkpoint saved.", epoch + 1, best_val)
+            LOG.info("New best at epoch %d (val_mae=%.4f, val_rmse=%.4f). Checkpoint saved.", epoch + 1, best_val, val_rmse)
         else:
             patience_left -= 1
             LOG.info("No improvement. Patience left: %d", patience_left)

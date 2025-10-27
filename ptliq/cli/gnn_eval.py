@@ -106,18 +106,35 @@ def main(
 
     pred_all = torch.cat(preds) if preds else torch.empty(0)
     true_all = torch.cat(trues) if trues else torch.empty(0)
-    mae = float(torch.mean(torch.abs(pred_all - true_all)).item()) if pred_all.numel() else float("inf")
+    if pred_all.numel():
+        diff = pred_all - true_all
+        mae = float(torch.mean(torch.abs(diff)).item())
+        rmse = float(torch.sqrt(torch.mean(diff * diff)).item())
+    else:
+        mae = float("inf")
+        rmse = float("inf")
+
+    # try to read best metrics if present (support both flat and nested under 'best')
+    best_epoch = int(ckpt_obj.get("best_epoch", -1))
+    best_val_mae_bps = ckpt_obj.get("best_val_mae_bps")
+    best_val_rmse_bps = ckpt_obj.get("best_val_rmse_bps")
+    if "best" in ckpt_obj and isinstance(ckpt_obj["best"], dict):
+        best_epoch = int(ckpt_obj["best"].get("best_epoch", ckpt_obj["best"].get("epoch", best_epoch)))
+        best_val_mae_bps = ckpt_obj["best"].get("best_val_mae_bps", ckpt_obj["best"].get("val_mae", best_val_mae_bps))
+        best_val_rmse_bps = ckpt_obj["best"].get("best_val_rmse_bps", best_val_rmse_bps)
 
     metrics = {
         "n": int(true_all.numel()),
         "mae_bps": mae,
-        "best_val_mae_bps": float(ckpt_obj.get("best_val_mae_bps", float("nan"))),
-        "best_epoch": int(ckpt_obj.get("best_epoch", -1)),
+        "rmse_bps": rmse,
+        "best_val_mae_bps": float(best_val_mae_bps) if best_val_mae_bps is not None else float("nan"),
+        "best_val_rmse_bps": float(best_val_rmse_bps) if best_val_rmse_bps is not None else float("nan"),
+        "best_epoch": int(best_epoch),
     }
     (outdir / "metrics_test.json").write_text(json.dumps(metrics, indent=2))
     typer.echo(
-        f"[gnn-eval] n={metrics['n']} test_mae_bps={metrics['mae_bps']:.6f} "
-        f"(best_val={metrics['best_val_mae_bps']:.6f} @ {metrics['best_epoch']})"
+        f"[gnn-eval] n={metrics['n']} test_mae_bps={metrics['mae_bps']:.6f} test_rmse_bps={metrics['rmse_bps']:.6f} "
+        f"(best_val_mae={metrics['best_val_mae_bps']:.6f}, best_val_rmse={metrics['best_val_rmse_bps']:.6f} @ {metrics['best_epoch']})"
     )
 
 # expose Typer app object (console script calls this)

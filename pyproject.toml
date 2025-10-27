@@ -39,6 +39,7 @@ ptliq-ig-oas = "ptliq.cli.ig_oas:app"
 ptliq-hy-oas = "ptliq.cli.hy_oas:app"
 ptliq-vix = "ptliq.cli.vix:app"
 
+ptliq-train = "ptliq.cli.gat_train:app"
 ptliq-gat-train = "ptliq.cli.gat_train:app"
 ptliq-start-tensorboard = "ptliq.cli.tensorboard:app"
 ptliq-stop-tensorbord = "ptliq.cli.tensorboard_stop:app"

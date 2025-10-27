@@ -129,6 +129,7 @@ def train_loop(
     model = _build_model(in_dim, cfg).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     best_mae = math.inf
+    best_rmse = math.inf
     best_epoch = -1
     bad = 0
 
@@ -136,6 +137,9 @@ def train_loop(
 
     def _mae(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return (pred - target).abs().mean()
+
+    def _rmse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(torch.mean((pred - target) ** 2))
 
     for epoch in range(1, cfg.max_epochs + 1):
         model.train()
@@ -157,21 +161,29 @@ def train_loop(
             yv = torch.from_numpy(y_val).to(dev)
             pv = model(xv)
             mae_t = _mae(pv, yv)
+            rmse_t = _rmse(pv, yv)
             mae = float(mae_t.detach().cpu().item())
+            rmse = float(rmse_t.detach().cpu().item())
 
         # ensure finiteness (history stays numeric)
         if not np.isfinite(mae):
             mae = float("inf")
+        if not np.isfinite(rmse):
+            rmse = float("inf")
 
         history.append({
             "epoch": float(epoch),
             "train_loss": float(np.mean(tr_losses)) if tr_losses else float("nan"),
+            "val_mae_bps": mae,
+            "val_rmse_bps": rmse,
+            # legacy duplicate for compatibility with older readers
             "val_mae": mae,
         })
 
         if mae + 1e-12 < best_mae:
             best_mae = mae
             best_epoch = epoch
+            best_rmse = rmse
             bad = 0
             ckpt = {
                 "state_dict": model.state_dict(),
@@ -182,7 +194,8 @@ def train_loop(
                     "dropout": float(cfg.dropout),
                 },
                 "epoch": epoch,
-                "val_mae": best_mae,
+                "val_mae_bps": best_mae,
+                "val_rmse_bps": best_rmse,
             }
             torch.save(ckpt, outdir / "ckpt.pt")
         else:
@@ -211,6 +224,7 @@ def train_loop(
     metrics = {
         "best_epoch": int(best_epoch),
         "best_val_mae_bps": float(best_mae),
+        "best_val_rmse_bps": float(best_rmse),
         # legacy keys for compatibility
         "epoch": int(best_epoch),
         "val_mae": float(best_mae),
@@ -218,7 +232,7 @@ def train_loop(
     }
     (outdir / "metrics_val.json").write_text(json.dumps(metrics, indent=2))
 
-    return {"best_epoch": best_epoch, "best_val_mae_bps": float(best_mae)}
+    return {"best_epoch": best_epoch, "best_val_mae_bps": float(best_mae), "best_val_rmse_bps": float(best_rmse)}
 
 
 def load_model_for_eval(
