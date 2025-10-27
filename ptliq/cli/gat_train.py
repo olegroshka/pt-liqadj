@@ -5,6 +5,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Optional
+import os
 
 import typer
 import yaml
@@ -51,10 +52,11 @@ def _merge_cfg(js: Dict[str, Any], overrides: Dict[str, Any]) -> LiquidityRunCon
 
 @app.command()
 def app_main(
-    features_run_dir: Path = typer.Option(Path("data/features/exp001"), help="Folder with pyg_graph.pt and graph_nodes/edges"),
-    trades: Path = typer.Option(Path("data/raw/sim/trades.parquet")),
-    outdir: Path = typer.Option(Path("models/liquidity"), help="Model output dir"),
-    config: Optional[Path] = typer.Option(None, help="YAML with {sampler,train,model}"),
+    features_run_dir: Path = typer.Option(Path(os.getenv("PTLIQ_DEFAULT_PYG_DIR", "data/pyg")), help="Folder with pyg_graph.pt (from featurize pyg)"),
+    graph_dir: Path = typer.Option(Path(os.getenv("PTLIQ_DEFAULT_GRAPH_DIR", "data/graph")), help="Folder with graph_nodes/edges artifacts (from featurize graph)"),
+    trades: Path = typer.Option(Path(os.getenv("PTLIQ_DEFAULT_TRADES_PATH", "data/raw/sim/trades.parquet"))),
+    outdir: Path = typer.Option(Path(os.getenv("PTLIQ_DEFAULT_MODELS_DIR", "models/gat_diff")), help="Model output dir"),
+    config: Optional[Path] = typer.Option("configs/gat.default.yaml", help="YAML with {sampler,train,model}"),
     ranges: Optional[Path] = typer.Option(None, help="Optional ranges.json to define train/val periods"),
     # common train overrides
     device: str = typer.Option(None),
@@ -82,5 +84,5 @@ def app_main(
     print("=== gat-train: effective config ===")
     print(json.dumps({"sampler": asdict(run_cfg.sampler), "train": asdict(run_cfg.train), "model": asdict(run_cfg.model)}, indent=2))
 
-    metrics = train_gat(features_run_dir, trades, outdir, run_cfg, ranges_json=ranges)
+    metrics = train_gat(features_run_dir, trades, outdir, run_cfg, ranges_json=ranges, graph_dir=graph_dir)
     print(f"[OK] saved under {outdir}  |  best={metrics}")

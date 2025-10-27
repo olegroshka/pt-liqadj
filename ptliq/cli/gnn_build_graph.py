@@ -5,13 +5,14 @@ from pathlib import Path
 import json, typer
 import pandas as pd
 import torch
+import os
 
 cli = typer.Typer(no_args_is_help=True)
 
 @cli.command(name="build-graph")
 def build_graph(
     bonds: Path = typer.Option(..., help="bonds.parquet with columns: isin, issuer, sector, rating"),
-    outdir: Path = typer.Option(Path("data/graph"), help="Output directory for graph artifacts"),
+    outdir: Path = typer.Option(Path(os.getenv("PTLIQ_DEFAULT_GRAPH_DIR", "data/graph")), help="Output directory for graph artifacts"),
     min_issuer_size: int = typer.Option(1),
     min_sector_size: int = typer.Option(1),
 ):

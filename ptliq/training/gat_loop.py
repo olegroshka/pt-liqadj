@@ -63,6 +63,7 @@ class ModelConfig:
     issuer_emb_dim: int = 16
     dropout: float = 0.10
     rel_init_boost: Dict[int, float] | None = None   # {relation_id: gain}
+    encoder_type: str = "gat"  # 'gat' or 'gat_diff'
 
 @dataclass
 class LiquidityRunConfig:
@@ -152,7 +153,9 @@ def load_pyg_graph(base_dir: Path) -> Data:
     pt = base_dir / "pyg_graph.pt"
     if pt.exists():
         try:
-            return torch.load(pt, map_location="cpu")
+            # Torch 2.4+ may enforce safe loading that defaults to weights_only=True in some envs;
+            # explicitly disable it because this file stores a full torch_geometric.data.Data object.
+            return torch.load(pt, map_location="cpu", weights_only=False)  # type: ignore[arg-type]
         except Exception:
             pass
     # fallback from parquet/csv
@@ -359,6 +362,7 @@ def train_gat(
     outdir: Path,
     run_cfg: LiquidityRunConfig,
     ranges_json: Optional[Path] = None,
+    graph_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     dev = _device(run_cfg.train.device)
     torch.manual_seed(run_cfg.train.seed)
@@ -367,14 +371,15 @@ def train_gat(
     # graph + nodes
     data = load_pyg_graph(Path(features_run_dir))
     nodes_tab = None
-    # load nodes to build node_id map (parquet preferred)
+    # Determine where to read nodes/edges from: prefer explicit graph_dir, fallback to features_run_dir
+    base_nodes_dir = Path(graph_dir) if graph_dir is not None else Path(features_run_dir)
     for name in ("graph_nodes.parquet", "graph_nodes.csv"):
-        p = Path(features_run_dir) / name
+        p = base_nodes_dir / name
         if p.exists():
             nodes_tab = pd.read_parquet(p) if p.suffix == ".parquet" else pd.read_csv(p)
             break
     if nodes_tab is None:
-        raise FileNotFoundError("Could not find graph_nodes.(parquet|csv) next to pyg_graph.pt")
+        raise FileNotFoundError(f"Could not find graph_nodes.(parquet|csv) in {base_nodes_dir}")
 
     # trades
     trades = pd.read_parquet(trades_path) if str(trades_path).endswith(".parquet") else pd.read_csv(trades_path)
@@ -421,6 +426,7 @@ def train_gat(
         heads=run_cfg.model.heads,
         rel_emb_dim=run_cfg.model.rel_emb_dim,
         rel_init_boost=run_cfg.model.rel_init_boost or {},
+        encoder_type=getattr(run_cfg.model, 'encoder_type', 'gat'),
     ).to(dev)
     data = data.to(dev)  # keep once on device
 
@@ -501,6 +507,8 @@ def train_gat(
                 try:
                     writer.add_scalar("train/loss", float(losses["total"].item()), global_step)
                     writer.add_scalar("train/mae", float(mae.item()), global_step)
+                    # Per-step RMSE from current batch
+                    writer.add_scalar("train/rmse", float(torch.sqrt(mse).item()), global_step)
                 except Exception:
                     pass
             global_step += 1
@@ -528,6 +536,7 @@ def train_gat(
             f.write(json.dumps({
                 "epoch": ep,
                 "train_mae": train_mae,
+                "train_rmse": train_rmse,
                 "val": val_metrics
             }) + "\n")
 

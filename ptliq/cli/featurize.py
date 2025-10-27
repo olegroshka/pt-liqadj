@@ -4,12 +4,27 @@ from typing import Dict, List, Optional, Tuple
 import json
 import re
 from collections import defaultdict
+import os
 
 import numpy as np
 import pandas as pd
 import torch
 import typer
 from rich import print
+
+# Optional progress bar
+try:
+    from tqdm.auto import tqdm  # type: ignore
+except Exception:  # pragma: no cover - tqdm is optional
+    tqdm = None  # type: ignore
+
+def _pbar(iterable, desc: str = "", total: Optional[int] = None, enabled: bool = False):
+    if enabled and (tqdm is not None):
+        try:
+            return tqdm(iterable, total=total, desc=desc, leave=False)
+        except Exception:
+            return iterable
+    return iterable
 
 from ptliq.features.build import build_features
 
@@ -263,6 +278,7 @@ def _cotrade_pairs_failfast(
     target_min: int = 200,
     target_max: int = 300,
     random_state: int = 17,
+    progress: bool = False,
 ):
     rng = np.random.default_rng(random_state)
     t = trades.copy()
@@ -320,7 +336,7 @@ def _cotrade_pairs_failfast(
     bidx = bonds.set_index("isin")
     acc: Dict[Tuple[str, str], float] = defaultdict(float)
 
-    for gg in groups:
+    for gg in _pbar(groups, desc="COTRADE: groups", total=len(groups), enabled=progress):
         rows = gg[["isin", "sign", "dv01_dollar", "decay"]].to_dict("records")
         n = len(rows)
         for a in range(n - 1):
@@ -352,11 +368,171 @@ def _cotrade_pairs_failfast(
 # Graph build (nodes, edges, sparsify)
 # -----------------------
 
+# --- Correlation priors helpers ---
+
+def _ensure_trade_date(df: pd.DataFrame) -> pd.Series:
+    if "trade_dt" in df.columns:
+        return pd.to_datetime(df["trade_dt"], errors="coerce").dt.normalize()
+    if "trade_date" in df.columns:
+        return pd.to_datetime(df["trade_date"], errors="coerce").dt.normalize()
+    if "exec_time" in df.columns:
+        return pd.to_datetime(df["exec_time"], errors="coerce").dt.normalize()
+    if "ts" in df.columns:
+        return pd.to_datetime(df["ts"], errors="coerce").dt.normalize()
+    raise typer.BadParameter("[trades] no trade_dt/exec_time/ts present to build daily signal")
+
+
+def _daily_surprise_series(trades: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build per-bond daily surprise series: mean(price - median(price) per date×isin),
+    z-scored per isin over the available span; forward-filled up to 3 days to stabilize.
+    Returns a wide DataFrame indexed by date with columns as isin symbols, float values.
+    """
+    t = trades.copy()
+    t["trade_dt"] = _ensure_trade_date(t)
+    _require_cols(t, ["isin", "price", "trade_dt"], "trades")
+    t = t.dropna(subset=["isin", "price", "trade_dt"]).copy()
+    if t.empty:
+        raise typer.BadParameter("[corr] no trades after cleaning isin/price/trade_dt")
+    t["price"] = pd.to_numeric(t["price"], errors="coerce")
+    med = t.groupby(["trade_dt", "isin"])['price'].transform('median')
+    t["y_bps"] = (t["price"] - med) * 100.0
+    dly = t.groupby(["trade_dt", "isin"], as_index=False)["y_bps"].mean()
+    mat = dly.pivot(index="trade_dt", columns="isin", values="y_bps").sort_index()
+    # z-score per column
+    def _z(s: pd.Series) -> pd.Series:
+        x = pd.to_numeric(s, errors="coerce").astype(float)
+        mu = np.nanmean(x)
+        sd = np.nanstd(x) + 1e-8
+        z = (x - mu) / sd
+        return pd.Series(z, index=s.index)
+    mat = mat.apply(_z, axis=0)
+    # complete calendar and ffill up to 3 days
+    if len(mat.index) >= 2:
+        full_idx = pd.date_range(mat.index.min(), mat.index.max(), freq="D")
+        mat = mat.reindex(full_idx)
+        mat = mat.ffill(limit=3)
+    mat = mat.fillna(0.0)
+    mat.index.name = "trade_dt"
+    return mat
+
+
+def _corr_matrix_pcc(W: np.ndarray) -> np.ndarray:
+    # W: (T, N) z-scored
+    if W.ndim != 2 or W.shape[1] == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+    # Guard against divide-by-zero warnings inside numpy when columns are constant
+    with np.errstate(divide='ignore', invalid='ignore'):
+        C = np.corrcoef(W, rowvar=False)
+    C = np.nan_to_num(C, nan=0.0, posinf=0.0, neginf=0.0)
+    C = np.abs(C)  # magnitude only for initial prior
+    np.fill_diagonal(C, 0.0)
+    return C.astype(np.float32)
+
+
+def _corr_matrix_mi(W: np.ndarray, n_bins: int = 16, progress: bool = False) -> np.ndarray:
+    # Quantile-discretize each column then compute plug-in MI; normalize to [0,1]
+    T, N = W.shape
+    if N == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+    # discretize per column to quantile bins
+    X = np.zeros_like(W, dtype=np.int32)
+    for j in _pbar(range(N), desc="MI: binning", total=N, enabled=progress):
+        col = W[:, j]
+        # handle constant columns
+        if np.nanstd(col) < 1e-12:
+            X[:, j] = 0
+            continue
+        q = np.nanquantile(col, np.linspace(0, 1, n_bins + 1))
+        # unique bin edges to avoid issues
+        q = np.unique(q)
+        if len(q) <= 2:
+            X[:, j] = 0
+        else:
+            # digitize uses right-open bins by default
+            X[:, j] = np.clip(np.digitize(col, q[1:-1], right=False), 0, n_bins - 1)
+    # compute MI
+    MI = np.zeros((N, N), dtype=np.float64)
+    for i in _pbar(range(N), desc="MI: matrix", total=N, enabled=progress):
+        xi = X[:, i]
+        pi = np.bincount(xi, minlength=n_bins).astype(np.float64)
+        pi = pi / max(1, pi.sum())
+        for j in range(i + 1, N):
+            xj = X[:, j]
+            pj = np.bincount(xj, minlength=n_bins).astype(np.float64)
+            pj = pj / max(1, pj.sum())
+            # joint
+            joint = np.zeros((n_bins, n_bins), dtype=np.float64)
+            for t in range(T):
+                joint[xi[t], xj[t]] += 1.0
+            joint = joint / max(1, joint.sum())
+            with np.errstate(divide='ignore', invalid='ignore'):
+                prod = (pi[:, None] * pj[None, :])
+                mask = (joint > 0) & (prod > 0)
+                val = np.where(mask, joint * (np.log(joint + 1e-12) - np.log(prod + 1e-12)), 0.0)
+            mi = float(np.nansum(val))
+            MI[i, j] = MI[j, i] = mi
+    # normalize to [0,1]
+    maxv = float(MI.max()) if MI.size > 0 else 1.0
+    if maxv > 0:
+        MI = MI / maxv
+    np.fill_diagonal(MI, 0.0)
+    return MI.astype(np.float32)
+
+
+def _corr_edges(nodes: pd.DataFrame, series_df: pd.DataFrame, scope: str, typ: str, topk: int,
+                pcc_tau: float = 0.2, mi_tau: float = 0.05, progress: bool = False) -> List[Tuple[str, str, str, float]]:
+    """
+    Returns list of (src_isin, dst_isin, relation, weight) for correlation priors.
+    scope: 'global' | 'local'; typ: 'pcc' | 'mi'
+    """
+    if series_df.empty:
+        return []
+    # align to nodes universe
+    isins = nodes["isin"].astype(str).tolist()
+    use_cols = [c for c in series_df.columns if c in isins]
+    if len(use_cols) < 2:
+        return []
+    W = series_df[use_cols].to_numpy(np.float32, copy=False)
+    if typ == 'pcc':
+        M = _corr_matrix_pcc(W)
+        tau = float(pcc_tau)
+        rel_name = f"PCC_{scope.upper()}"
+    else:
+        M = _corr_matrix_mi(W, progress=progress)
+        tau = float(mi_tau)
+        rel_name = f"MI_{scope.upper()}"
+    N = M.shape[1]
+    out: List[Tuple[str, str, str, float]] = []
+    # per-node TopK with threshold
+    for j in _pbar(range(N), desc=f"{rel_name}: topk", total=N, enabled=progress):
+        row = M[j]
+        # indices sorted by weight desc
+        idx = np.argsort(row)[::-1]
+        kept = []
+        for k in idx:
+            if k == j:
+                continue
+            w = float(row[k])
+            if w < tau:
+                break  # since sorted desc
+            kept.append((j, k, w))
+            if len(kept) >= int(topk):
+                break
+        for _, k, w in kept:
+            a = use_cols[min(j, k)]; b = use_cols[max(j, k)]
+            out.append((a, b, rel_name, float(w)))
+    # deduplicate by (a,b)
+    if out:
+        df = pd.DataFrame(out, columns=["src_isin","dst_isin","relation","weight"]).drop_duplicates()
+        return list(df.itertuples(index=False, name=None))
+    return []
+
 @app.command("graph")
 def featurize_graph(
     bonds: Path = typer.Option(..., help="bonds.parquet"),
     trades: Path = typer.Option(..., help="trades.parquet"),
-    outdir: Path = typer.Option(Path("data/graph"), help="Output directory"),
+    outdir: Path = typer.Option(Path(os.getenv("PTLIQ_DEFAULT_GRAPH_DIR", "data/graph")), help="Output directory"),
     expo_scale: float = typer.Option(5e4, help="Exposure scaling (dv01_dollar/expo_scale)"),
     target_min: int = typer.Option(200, help="Min chunk when coalescing PF_YYYYMMDD base"),
     target_max: int = typer.Option(300, help="Max chunk when coalescing PF_YYYYMMDD base"),
@@ -367,6 +543,16 @@ def featurize_graph(
     rating_topk: int = typer.Option(4),
     curve_topk: int = typer.Option(4),
     currency_topk: int = typer.Option(0),
+    # --- correlation priors ---
+    corr_enable: bool = typer.Option(True, help="Add PCC/MI correlation priors"),
+    corr_pcc: bool = typer.Option(True, help="Enable Pearson correlation edges"),
+    corr_mi: bool = typer.Option(True, help="Enable mutual information edges"),
+    corr_local: bool = typer.Option(True, help="Build local-window correlations"),
+    corr_global: bool = typer.Option(True, help="Build global (train-span) correlations"),
+    corr_topk: int = typer.Option(20, help="Top-K per node for correlation edges"),
+    corr_local_days: int = typer.Option(20, help="Window in trading days for local correlations"),
+    # --- UI ---
+    progress: bool = typer.Option(True, help="Show tqdm progress bars during heavy steps"),
 ) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     bdf = pd.read_parquet(bonds)
@@ -481,10 +667,27 @@ def featurize_graph(
     )
 
     cotrade_edges = _cotrade_pairs_failfast(
-        trades=tdf, bonds=bdf, expo_scale=expo_scale, target_min=target_min, target_max=target_max
+        trades=tdf, bonds=bdf, expo_scale=expo_scale, target_min=target_min, target_max=target_max, progress=progress
     )
 
     edges_all = issuer_edges + sector_edges + rating_edges + curve_edges + currency_edges + cotrade_edges
+
+    # --- append correlation priors ---
+    if corr_enable:
+        try:
+            series_all = _daily_surprise_series(tdf)
+            if corr_global and corr_pcc:
+                edges_all += _corr_edges(nodes, series_all, 'global', 'pcc', corr_topk, progress=progress)
+            if corr_local and corr_pcc:
+                series_loc = series_all.tail(int(corr_local_days)) if int(corr_local_days) > 0 else series_all
+                edges_all += _corr_edges(nodes, series_loc, 'local', 'pcc', corr_topk, progress=progress)
+            if corr_global and corr_mi:
+                edges_all += _corr_edges(nodes, series_all, 'global', 'mi', corr_topk, progress=progress)
+            if corr_local and corr_mi:
+                series_loc = series_all.tail(int(corr_local_days)) if int(corr_local_days) > 0 else series_all
+                edges_all += _corr_edges(nodes, series_loc, 'local', 'mi', corr_topk, progress=progress)
+        except Exception as e:
+            typer.echo(f"[corr] failed to build correlation priors: {e}", err=True)
     edges = pd.DataFrame(edges_all, columns=["src_isin", "dst_isin", "relation", "weight"])
     edges = edges[edges["src_isin"] != edges["dst_isin"]].copy()
     edges["src_id"] = edges["src_isin"].map(node_id_map)
@@ -548,8 +751,6 @@ def featurize_graph(
     edges = edges.groupby(["src_id", "dst_id", "relation"], as_index=False)["weight"].sum()
 
     _print_relation_counts("AFTER PRUNE", edges)
-    typer.echo("COTRADE_CO edges: " + str(int((edges["relation"] == "COTRADE_CO").sum())))
-    typer.echo("COTRADE_X edges: " + str(int((edges["relation"] == "COTRADE_X").sum())))
 
     nodes_out = nodes[[
         "node_id",
@@ -603,8 +804,8 @@ def featurize_graph(
 
 @app.command("pyg")
 def featurize_pyg(
-    graph_dir: Path = typer.Option(Path("data/graph"), help="Dir with graph_nodes.csv, graph_edges.csv, edge_index.npz"),
-    outdir: Path = typer.Option(Path("data/pyg"), help="Output dir for pyg_graph.pt and feature_meta.json"),
+    graph_dir: Path = typer.Option(Path(os.getenv("PTLIQ_DEFAULT_GRAPH_DIR", "data/graph")), help="Dir with graph_nodes.csv, graph_edges.csv, edge_index.npz"),
+    outdir: Path = typer.Option(Path(os.getenv("PTLIQ_DEFAULT_PYG_DIR", "data/pyg")), help="Output dir for pyg_graph.pt and feature_meta.json"),
 ) -> None:
     # Prefer Parquet; fall back to CSV for backward compatibility
     nodes_parq = graph_dir / "graph_nodes.parquet"
@@ -664,6 +865,14 @@ def featurize_pyg(
     edge_type = np.concatenate([et, et]).astype(np.int64)
     edge_weight = np.concatenate([ew, ew]).astype(np.float32)
 
+    # Build a boolean mask for correlation edges (PCC_*, MI_*) if present
+    corr_rel_names = [r for r in edges["relation"].unique().tolist() if isinstance(r, str) and (r.startswith("PCC_") or r.startswith("MI_"))]
+    corr_rel_ids = set(edges.loc[edges["relation"].isin(corr_rel_names), "relation_id"].astype(int).unique().tolist())
+    corr_mask = None
+    if len(corr_rel_ids) > 0:
+        base_mask = np.isin(et, np.fromiter(corr_rel_ids, dtype=np.int64))
+        corr_mask = np.concatenate([base_mask, base_mask]).astype(bool)
+
     try:
         from torch_geometric.data import Data
     except Exception as ie:
@@ -677,6 +886,8 @@ def featurize_pyg(
         num_nodes=int(N),
     )
     data.issuer_index = torch.from_numpy(issuer_id)
+    if corr_mask is not None:
+        data.corr_edge_mask = torch.from_numpy(corr_mask)
 
     torch.save(data, outdir / "pyg_graph.pt")
     meta = {

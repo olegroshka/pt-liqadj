@@ -438,6 +438,41 @@ class GraphEncoder(nn.Module):
         h = self.conv2(h, edge_index, edge_attr=ea); h = self.bn2(h); h = torch.relu(h)
         return h
 
+class CorrDifferentialRefiner(nn.Module):
+    """
+    DGT-style subtractive refinement over correlation slab only:
+    prior mix (A h) minus sigmoid(lambda) * dynamic GATv2 correction.
+    """
+    def __init__(self, d_model: int, lambda_init: float = 0.2):
+        super().__init__()
+        try:
+            # edge_dim=1 because we pass only scalar weights
+            self.gat = GATv2Conv(d_model, d_model // 4, heads=4, edge_dim=1, add_self_loops=False)
+        except Exception:
+            # In non-PyG env for some unit tests, provide a stub
+            class _Stub(nn.Module):
+                def forward(self, h, edge_index, edge_attr=None):
+                    return h
+            self.gat = _Stub()
+        self.ln = nn.LayerNorm(d_model)
+        self._lambda = nn.Parameter(torch.tensor(float(lambda_init)))
+
+    def forward(self, h: torch.Tensor, edge_index_corr: torch.Tensor, edge_weight_corr: torch.Tensor) -> torch.Tensor:
+        if edge_index_corr.numel() == 0:
+            return h
+        src = edge_index_corr[0].long(); dst = edge_index_corr[1].long()
+        w = edge_weight_corr.to(h.dtype).clamp_min(0.0)
+        # prior: normalized neighbor mix on corr slab
+        denom = torch.zeros(h.size(0), device=h.device, dtype=h.dtype)
+        denom = denom.index_add(0, dst, w)
+        prior = torch.zeros_like(h)
+        prior = prior.index_add(0, dst, h[src] * w.unsqueeze(-1))
+        prior = prior / (denom.clamp_min(1e-6).unsqueeze(-1))
+        # dynamic correction via GATv2 over the same edges
+        dyn = self.gat(h, edge_index_corr, edge_attr=w.view(-1, 1))
+        out = self.ln(prior - torch.sigmoid(self._lambda) * dyn)
+        return out
+
 class LiquidityModelGAT(nn.Module):
     """
     End-to-end portfolio-conditioned residual model:
@@ -452,14 +487,18 @@ class LiquidityModelGAT(nn.Module):
                  dropout: float = 0.1,
                  heads: int = 4,
                  rel_emb_dim: int = 16,
-                 rel_init_boost: dict | None = None):
+                 rel_init_boost: dict | None = None,
+                 encoder_type: str = "gat"):
         super().__init__()
+        self.encoder_type = str(encoder_type)
         self.encoder  = GraphEncoder(
             x_dim, num_relations, d_model,
             issuer_emb_dim=issuer_emb_dim, num_issuers=num_issuers,
             heads=heads, rel_emb_dim=rel_emb_dim, dropout=dropout,
             rel_init_boost=rel_init_boost
         )
+        if self.encoder_type == "gat_diff":
+            self.corr_refiner = CorrDifferentialRefiner(d_model=d_model)
         self.backbone = LiquidityResidualBackbone(d_model=d_model, n_heads=heads, dropout=dropout)
 
     # convenience: tensors API
@@ -475,15 +514,23 @@ class LiquidityModelGAT(nn.Module):
 
     # convenience: PyG Data API
     def forward_from_data(self,
-                          data: Data,
-                          target_index: torch.LongTensor,
-                          port_index: torch.LongTensor, port_batch: torch.LongTensor,
-                          port_weight: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                         data: Data,
+                         target_index: torch.LongTensor,
+                         port_index: torch.LongTensor, port_batch: torch.LongTensor,
+                         port_weight: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         h = self.encoder(
             data.x, data.edge_index, data.edge_type,
             edge_weight=getattr(data, "edge_weight", None),
             issuer_index=getattr(data, "issuer_index", None),
         )
+        # Optional differential refinement over correlation edges only
+        if getattr(self, "encoder_type", "gat") == "gat_diff":
+            mask = getattr(data, "corr_edge_mask", None)
+            if mask is not None and mask.numel() == data.edge_index.size(1):
+                ei_corr = data.edge_index[:, mask]
+                ew_corr = data.edge_weight[mask] if hasattr(data, "edge_weight") and data.edge_weight is not None else torch.zeros(mask.sum().item(), device=h.device, dtype=h.dtype)
+                if ei_corr.numel() > 0:
+                    h = self.corr_refiner(h, ei_corr, ew_corr)
         return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight)
 
 # Alias for notebooks

@@ -24,3 +24,6 @@ model:
   issuer_emb_dim: 16
   dropout: 0.10
   rel_init_boost: {}
+  # Encoder options: "gat" (default) or "gat_diff" for correlation/mutual information differential refiner
+  #encoder_type: gat
+  encoder_type: gat_diff
