@@ -488,7 +488,8 @@ class LiquidityModelGAT(nn.Module):
                  heads: int = 4,
                  rel_emb_dim: int = 16,
                  rel_init_boost: dict | None = None,
-                 encoder_type: str = "gat"):
+                 encoder_type: str = "gat",
+                 baseline_dim: int = 0):
         super().__init__()
         self.encoder_type = str(encoder_type)
         self.encoder  = GraphEncoder(
@@ -499,7 +500,7 @@ class LiquidityModelGAT(nn.Module):
         )
         if self.encoder_type == "gat_diff":
             self.corr_refiner = CorrDifferentialRefiner(d_model=d_model)
-        self.backbone = LiquidityResidualBackbone(d_model=d_model, n_heads=heads, dropout=dropout)
+        self.backbone = LiquidityResidualBackbone(d_model=d_model, n_heads=heads, dropout=dropout, baseline_dim=baseline_dim)
 
     # convenience: tensors API
     def forward_from_tensors(self,
@@ -508,16 +509,18 @@ class LiquidityModelGAT(nn.Module):
                              target_index: torch.LongTensor,
                              port_index: torch.LongTensor, port_batch: torch.LongTensor,
                              port_weight: Optional[torch.Tensor] = None,
-                             issuer_index: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                             issuer_index: Optional[torch.Tensor] = None,
+                             baseline_feats: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         h = self.encoder(x, edge_index, edge_type, edge_weight=edge_weight, issuer_index=issuer_index)
-        return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight)
+        return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight, baseline_feats=baseline_feats)
 
     # convenience: PyG Data API
     def forward_from_data(self,
                          data: Data,
                          target_index: torch.LongTensor,
                          port_index: torch.LongTensor, port_batch: torch.LongTensor,
-                         port_weight: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                         port_weight: Optional[torch.Tensor] = None,
+                         baseline_feats: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         h = self.encoder(
             data.x, data.edge_index, data.edge_type,
             edge_weight=getattr(data, "edge_weight", None),
@@ -531,7 +534,7 @@ class LiquidityModelGAT(nn.Module):
                 ew_corr = data.edge_weight[mask] if hasattr(data, "edge_weight") and data.edge_weight is not None else torch.zeros(mask.sum().item(), device=h.device, dtype=h.dtype)
                 if ei_corr.numel() > 0:
                     h = self.corr_refiner(h, ei_corr, ew_corr)
-        return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight)
+        return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight, baseline_feats=baseline_feats)
 
 # Alias for notebooks
 LiquidityModelColab = LiquidityModelGAT

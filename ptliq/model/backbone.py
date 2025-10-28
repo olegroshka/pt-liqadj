@@ -125,7 +125,7 @@ class LiquidityResidualBackbone(nn.Module):
       - Target→portfolio cross-attention
       - Fuse [target, context, fused] and predict via heads
     """
-    def __init__(self, d_model: int = 128, n_heads: int = 4, dropout: float = 0.1, heads_module=None):
+    def __init__(self, d_model: int = 128, n_heads: int = 4, dropout: float = 0.1, heads_module=None, baseline_dim: int = 0):
         super().__init__()
         self.pma   = PMAPooling(d_model, n_heads, dropout)
         self.cross = TargetPortfolioCrossAttention(d_model, n_heads, dropout)
@@ -133,6 +133,15 @@ class LiquidityResidualBackbone(nn.Module):
         self.fuse    = nn.Sequential(nn.Linear(3*d_model, d_model),
                                      nn.ReLU(), nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
                                      nn.Linear(d_model, d_model))
+        # Optional per-trade baseline (size/side[/urgency]) → additive d_model correction
+        self.baseline_proj = None
+        if baseline_dim and baseline_dim > 0:
+            self.baseline_proj = nn.Sequential(
+                nn.Linear(baseline_dim, d_model),
+                nn.ReLU(),
+                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+                nn.Linear(d_model, d_model),
+            )
         if heads_module is None:
             from .heads import QuantileHeads
             heads_module = QuantileHeads
@@ -144,7 +153,8 @@ class LiquidityResidualBackbone(nn.Module):
         target_index: torch.LongTensor,          # (B,)
         port_index: torch.LongTensor,            # (T,)
         port_batch: torch.LongTensor,            # (T,) in [0..B-1]
-        port_weight: torch.Tensor | None = None  # (T,)
+        port_weight: torch.Tensor | None = None,  # (T,)
+        baseline_feats: torch.Tensor | None = None,  # (B, K)
     ) -> Dict[str, torch.Tensor]:
         B = int(target_index.numel())
         d = node_embeddings.size(-1)
@@ -186,4 +196,6 @@ class LiquidityResidualBackbone(nn.Module):
         z = torch.cat([targets, contexts, fused], dim=-1)
         z = self.fuse_ln(z)
         z = self.fuse(z)
+        if (self.baseline_proj is not None) and (baseline_feats is not None) and baseline_feats.numel() > 0:
+            z = z + self.baseline_proj(baseline_feats)
         return self.heads(z)

@@ -180,6 +180,7 @@ class Sample:
     residual: float
     liq_ref: float
     dt_ord: int
+    base_feats: List[float]
 
 def _extract_pf_base(x: str) -> Optional[str]:
     if not isinstance(x, str): return None
@@ -380,7 +381,19 @@ def build_samples(
             diag_side.append(float(side_val))
             diag_vendor_liq.append(float(L))
 
-            samples.append(Sample(tgt_node, port_nodes, port_weights, r, L, group_dt_ord))
+            # per-trade baseline features: [log_size, side]
+            # trade features: log size (fallbacks) and side sign
+            size_raw = row.get("size", np.nan)
+            if pd.isna(size_raw):
+                size_raw = row.get("quantity_par", np.nan)
+            if pd.isna(size_raw):
+                size_raw = row.get("dv01_dollar", 0.0)
+            log_size = float(np.log1p(abs(float(size_raw))))
+            sgn = float(row["sign"]) if pd.notna(row["sign"]) else 0.0
+            base_feats = [log_size, sgn]  # keep small & stable; urgency can be appended later
+            samples.append(Sample(tgt_node, port_nodes, port_weights, r, L, group_dt_ord, base_feats))
+            #base_feats = [float(np.log1p(abs(float(row.get("dv01_dollar", 0.0))))), float(row.get("_sign", 0.0))]
+            #samples.append(Sample(tgt_node, port_nodes, port_weights, r, L, group_dt_ord, base_feats))
 
     # Sanity: unique (target, day) pairs vs total samples
     try:
@@ -441,8 +454,17 @@ def port_collate(batch: List[Sample]) -> Dict[str, torch.Tensor]:
         port_batch = torch.empty(0, dtype=torch.long)
     residual = torch.tensor([b.residual for b in batch], dtype=torch.float32)
     liq_ref  = torch.tensor([b.liq_ref  for b in batch], dtype=torch.float32)
+    # Baseline per-trade features: tolerate legacy samples without base_feats
+    try:
+        if all(hasattr(b, "base_feats") and b.base_feats is not None for b in batch):
+            baseline_feats = torch.tensor([b.base_feats for b in batch], dtype=torch.float32)
+        else:
+            baseline_feats = torch.zeros((B, 2), dtype=torch.float32)
+    except Exception:
+        baseline_feats = torch.zeros((B, 2), dtype=torch.float32)
     return dict(target_index=tgt, port_index=port_index, port_batch=port_batch,
-                port_weight=port_weight, residual=residual, liq_ref=liq_ref, sizes=sizes, port_abs_sum=port_abs_sum)
+                port_weight=port_weight, residual=residual, liq_ref=liq_ref,
+                baseline_feats=baseline_feats, sizes=sizes, port_abs_sum=port_abs_sum)
 
 # ---------------------------
 # Evaluation metrics (VAL)
@@ -458,7 +480,8 @@ def eval_epoch(model: LiquidityModelGAT, data: Data, loader: DataLoader, device:
         pw   = batch["port_weight"].to(device) if batch["port_weight"].numel() > 0 else None
         r    = batch["residual"].to(device)
 
-        out = model.forward_from_data(data, tgt, pidx, pbat, pw)
+        bf   = batch.get("baseline_feats", torch.empty(0)).to(device) if isinstance(batch, dict) else None
+        out = model.forward_from_data(data, tgt, pidx, pbat, pw, baseline_feats=bf)
         preds_m.append(out["delta_mean"].flatten())
         preds50.append(out["q50"].flatten())
         preds90.append(out["q90"].flatten())
@@ -591,6 +614,7 @@ def train_gat(
         rel_emb_dim=run_cfg.model.rel_emb_dim,
         rel_init_boost=run_cfg.model.rel_init_boost or {},
         encoder_type=getattr(run_cfg.model, 'encoder_type', 'gat'),
+        baseline_dim=2,
     ).to(dev)
     data = data.to(dev)  # keep once on device
 
@@ -661,7 +685,8 @@ def train_gat(
             r    = batch["residual"].to(dev)
             Lr   = batch["liq_ref"].to(dev)
 
-            out = model.forward_from_data(data, tgt, pidx, pbat, pw)
+            bf   = batch.get("baseline_feats", torch.empty(0)).to(dev) if isinstance(batch, dict) else None
+            out = model.forward_from_data(data, tgt, pidx, pbat, pw, baseline_feats=bf)
             # mild ramp on q90 weight
             losses = composite_loss(out, r, Lr, alpha=1.0, beta=beta_schedule(ep), gamma=0.1, delta_huber=1.0)
 
