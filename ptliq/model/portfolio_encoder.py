@@ -34,7 +34,7 @@ class PortfolioEncoder(nn.Module):
         dropout: float = 0.0,
         beta_init: float = 0.8,  # convex update strength
         learnable_tau: bool = False,
-        tau_init: float = 1.0,
+        tau_init: float = 3.0,
     ):
         super().__init__()
         self.d_model = d_model

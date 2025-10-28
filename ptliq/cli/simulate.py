@@ -36,6 +36,10 @@ def main(
     outdir: Path = typer.Option(Path("data/raw/sim"), help="Output directory"),
     seed: Optional[int] = typer.Option(None, help="Override seed"),
 
+    # Speed knobs (override config during tests/quick runs)
+    n_bonds: Optional[int] = typer.Option(None, help="Override number of bonds to simulate"),
+    n_days: Optional[int] = typer.Option(None, help="Override number of days to simulate"),
+
     # Existing knobs (with safe fallbacks)
     par: Optional[float] = typer.Option(None, help="Face value used to anchor clean_price (default 100.0)"),
     base_spread_bps: Optional[float] = typer.Option(None, help="Baseline clean-price spread in bps"),
@@ -74,6 +78,16 @@ def main(
 
     liq_urgency_coeff: Optional[float] = typer.Option(None, help="Coefficient of urgency in y_bps"),
     second_resolution: Optional[bool] = typer.Option(None, help="Use second-level timestamps like TRACE"),
+
+    # Phase-1 delta controls
+    delta_scale: Optional[float] = typer.Option(None, help="Global scale β for planted Δ*(P) signal (0 disables)"),
+    delta_bias: Optional[float] = typer.Option(None, help="θ0 bias term for Δ*(P) (bps)"),
+    delta_size: Optional[float] = typer.Option(None, help="θ_size coefficient for log |dv01|"),
+    delta_side: Optional[float] = typer.Option(None, help="θ_side coefficient for side (+ for SELL widens)"),
+    delta_issuer: Optional[float] = typer.Option(None, help="θ_iss coefficient for same-issuer fraction"),
+    delta_sector: Optional[float] = typer.Option(None, help="θ_sec coefficient for sector concentration"),
+    delta_noise_std: Optional[float] = typer.Option(None, help="σ for Gaussian noise in Δ*(P) (bps)"),
+
     loglevel: str = typer.Option("INFO"),
 ):
     """
@@ -90,8 +104,8 @@ def main(
     sim_cfg = get_sim_config(cfg)  # object or dict with at least n_bonds, n_days, providers, seed
 
     # Required basics (present in your existing config)
-    n_bonds = _getattr_safe(sim_cfg, "n_bonds", 300)
-    n_days = _getattr_safe(sim_cfg, "n_days", 30)
+    n_bonds = int(n_bonds) if n_bonds is not None else _getattr_safe(sim_cfg, "n_bonds", 300)
+    n_days = int(n_days) if n_days is not None else _getattr_safe(sim_cfg, "n_days", 30)
     providers = _getattr_safe(sim_cfg, "providers", ["P1"])
     sim_seed = seed if seed is not None else _getattr_safe(sim_cfg, "seed", 42)
 
@@ -99,8 +113,20 @@ def main(
     from ptliq.data.simulate import SimParams as _Def
     _defaults = _Def(n_bonds=1, n_days=1, providers=["P"], seed=0, outdir=Path("."))
 
+    def _norm_cli(v):
+        """Normalize Typer OptionInfo defaults to None when function is called directly."""
+        try:
+            from typer.models import OptionInfo as _OptionInfo  # type: ignore
+            if isinstance(v, _OptionInfo):
+                return None
+        except Exception:
+            # typer may not be available or structure changed; fall back
+            pass
+        return v
+
     def pick(name: str, cli_value, default_from=_defaults):
-        return cli_value if cli_value is not None else _getattr_safe(sim_cfg, name, getattr(default_from, name))
+        v = _norm_cli(cli_value)
+        return v if v is not None else _getattr_safe(sim_cfg, name, getattr(default_from, name))
 
     params = SimParams(
         n_bonds=int(n_bonds),
@@ -121,6 +147,15 @@ def main(
         liq_rating_coeff=float(pick("liq_rating_coeff", liq_rating_coeff)),
         liq_eps_bps=float(pick("liq_eps_bps", liq_eps_bps)),
         micro_price_noise_bps=float(pick("micro_price_noise_bps", micro_price_noise_bps)),
+
+        # Phase-1 Δ*(P)
+        delta_scale=float(pick("delta_scale", delta_scale)),
+        delta_bias=float(pick("delta_bias", delta_bias)),
+        delta_size=float(pick("delta_size", delta_size)),
+        delta_side=float(pick("delta_side", delta_side)),
+        delta_issuer=float(pick("delta_issuer", delta_issuer)),
+        delta_sector=float(pick("delta_sector", delta_sector)),
+        delta_noise_std=float(pick("delta_noise_std", delta_noise_std)),
 
         portfolio_trade_share=float(pick("portfolio_trade_share", portfolio_trade_share)),
         basket_size_min=int(pick("basket_size_min", basket_size_min)),
@@ -152,7 +187,7 @@ def main(
 
     frames = simulate(params)
 
-    # Write reproducibility sidecar metadata
+    # Write reproducibility sidecar metadata and config echo
     try:
         meta = asdict(params)
         # make non-serializable types JSON-friendly
@@ -161,10 +196,24 @@ def main(
         meta["sim_version"] = "0.1.0"
         from datetime import datetime as _dt
         meta["generated_at_utc"] = _dt.utcnow().isoformat(timespec="seconds")
+        # 1) meta (legacy)
         with open(Path(outdir) / "_meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
+        # 2) explicit config echo
+        with open(Path(outdir) / "sim_config_used.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+        # 3) schema description (names + dtypes)
+        schema = {
+            "bonds": {col: str(dtype) for col, dtype in frames["bonds"].dtypes.to_dict().items()},
+            "trades": {col: str(dtype) for col, dtype in frames["trades"].dtypes.to_dict().items()},
+        }
+        with open(Path(outdir) / "schema.json", "w", encoding="utf-8") as f:
+            json.dump(schema, f, indent=2)
+        # Echo concise summary to stdout
+        print("[bold cyan]Effective simulation config:[/bold cyan]")
+        print(json.dumps({k: v for k, v in meta.items() if k not in {"sim_version", "generated_at_utc"}}, indent=2))
     except Exception:
-        logging.warning("Could not write _meta.json sidecar metadata", exc_info=False)
+        logging.warning("Could not write sim sidecar metadata", exc_info=False)
 
     # Drop compatibility alias to avoid duplicate numeric columns on disk
     trades_out = frames["trades"].drop(columns=["price_clean_exec"], errors="ignore")

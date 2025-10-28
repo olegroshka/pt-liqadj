@@ -215,7 +215,8 @@ def _get_sign_col(df: pd.DataFrame) -> pd.Series:
     if "sign" in df and df["sign"].notna().any():
         s = pd.to_numeric(df["sign"], errors="coerce")
     elif "side" in df:
-        s = df["side"].map({"CBUY": 1, "BUY": 1, "CSELL": -1, "SELL": -1})
+        # Convention: SELL = +1 (widening), BUY = -1 (tightening), matching simulator's side_sign
+        s = df["side"].map({"CBUY": -1, "BUY": -1, "CSELL": 1, "SELL": 1})
     else:
         s = pd.Series([np.nan] * len(df))
     return s
@@ -526,8 +527,65 @@ def eval_epoch(model: LiquidityModelGAT, data: Data, loader: DataLoader, device:
     return dict(mae=mae, rmse=rmse, cov50=cov50, cov90=cov90, width_mean=w.mean().item(), width_std=w.std(unbiased=False).item())
 
 # ---------------------------
+# Label normalization helper (exported for tests)
+# ---------------------------
+
+def compute_label_norm(y_train: np.ndarray | list[float]) -> tuple[float, float]:
+    """Compute (mean, scale) for label normalization matching the training loop.
+    Scale uses MAD*1.4826 with std fallback if MAD is degenerate.
+    Returns (mean_bps, scale_bps).
+    """
+    y_arr = np.asarray(y_train, dtype=float)
+    y_mean = float(np.nanmean(y_arr)) if y_arr.size > 0 else 0.0
+    med = float(np.nanmedian(y_arr)) if y_arr.size > 0 else 0.0
+    mad = float(np.nanmedian(np.abs(y_arr - med))) * 1.4826 if y_arr.size > 0 else 0.0
+    y_std = float(mad if mad > 1e-6 else (np.nanstd(y_arr) + 1e-6))
+    return y_mean, y_std
+
+# ---------------------------
+# Scheduling helpers (exported for tests)
+# ---------------------------
+
+def sched_alpha(epoch: int) -> float:
+    """Deterministic schedule for alpha (weight of q50) by epoch (0-based).
+    Epochs 0–2: 0.0; 3–5: linear 0.1→0.6; ≥6: 1.0
+    """
+    if epoch <= 2:
+        return 0.0
+    if epoch <= 5:
+        frac = (epoch - 3) / 2.0
+        frac = float(max(0.0, min(1.0, frac)))
+        return 0.1 + (0.6 - 0.1) * frac
+    return 1.0
+
+def sched_lambda_huber(epoch: int) -> float:
+    """Deterministic schedule for lambda_huber by epoch (0-based).
+    Epochs 0–2: 1.0; 3–5: linear 1.0→0.3; ≥6: 0.2
+    """
+    if epoch <= 2:
+        return 1.0
+    if epoch <= 5:
+        frac = (epoch - 3) / 2.0
+        frac = float(max(0.0, min(1.0, frac)))
+        return 1.0 + (0.3 - 1.0) * frac
+    return 0.2
+
+def sched_lambda_noncross(epoch: int) -> float:
+    """Monotonicity guardrail (non-crossing) — stays on at 0.1 in tests."""
+    return 0.10
+
+def sched_lambda_wmono(epoch: int) -> float:
+    """Width monotonicity — 0.0 until epoch ≥6, then 0.10."""
+    return 0.0 if epoch <= 5 else 0.10
+
+def sched_beta_q90(epoch: int) -> float:
+    """Quantile-90 weight — kept 0.0 in tests until explicitly enabled later."""
+    return 0.0
+
+# ---------------------------
 # Orchestrator
 # ---------------------------
+
 def train_gat(
     features_run_dir: Path,
     trades_path: Path,
@@ -751,8 +809,13 @@ def train_gat(
         if epoch <= 2:
             return dict(alpha=0.0, lambda_huber=1.0, lambda_noncross=0.10, lambda_wmono=0.0)
         elif epoch <= 5:
-            frac = (epoch - 2) / 3.0
-            return dict(alpha=0.5 * frac + 0.1, lambda_huber=1.0 - 0.7*frac, lambda_noncross=0.10, lambda_wmono=0.0)
+            # Epochs 3,4,5: alpha ramps 0.1 -> 0.6 linearly; lambda_huber 1.0 -> 0.3 linearly
+            # When called from the main loop (ep starts at 1), map ep=3..5 to frac=0..1
+            frac = (epoch - 3) / 2.0
+            frac = float(max(0.0, min(1.0, frac)))
+            alpha = 0.1 + (0.6 - 0.1) * frac
+            lambda_huber = 1.0 + (0.3 - 1.0) * frac
+            return dict(alpha=alpha, lambda_huber=lambda_huber, lambda_noncross=0.10, lambda_wmono=0.0)
         else:
             return dict(alpha=1.0, lambda_huber=0.2, lambda_noncross=0.10, lambda_wmono=0.10)
 

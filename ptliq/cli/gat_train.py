@@ -41,6 +41,13 @@ def _merge_cfg(js: Dict[str, Any], overrides: Dict[str, Any]) -> LiquidityRunCon
 
     # CLI overrides (only when provided)
     for k, v in overrides.items():
+        # Normalize Typer OptionInfo defaults to None when app_main is invoked directly
+        try:
+            from typer.models import OptionInfo as _OptionInfo  # type: ignore
+            if isinstance(v, _OptionInfo):
+                v = None
+        except Exception:
+            pass
         if v is None:
             continue
         if hasattr(tc, k):
@@ -65,6 +72,8 @@ def app_main(
     lr: float = typer.Option(None),
     patience: int = typer.Option(None),
     seed: int = typer.Option(None),
+    # model override
+    encoder_type: Optional[str] = typer.Option(None, help="Encoder type: gat | gat_diff | mlp"),
     # logging options
     tb: Optional[bool] = typer.Option(None, help="Enable TensorBoard logging (default: True)"),
     tb_log_dir: Optional[Path] = typer.Option(None, help="Override TensorBoard log dir (default: <outdir>/tb)"),
@@ -73,7 +82,7 @@ def app_main(
     Train LiquidityModelGAT (Rel-GATv2 + PMA + cross-attn) from the new graph pipeline.
     """
     raw = _load_yaml(config)
-    overrides = dict(device=device, max_epochs=max_epochs, batch_size=batch_size, lr=lr, patience=patience, seed=seed)
+    overrides = dict(device=device, max_epochs=max_epochs, batch_size=batch_size, lr=lr, patience=patience, seed=seed, encoder_type=encoder_type)
     # map logging options into TrainConfig names
     if tb is not None:
         overrides["enable_tb"] = bool(tb)

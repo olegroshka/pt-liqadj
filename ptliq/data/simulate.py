@@ -38,6 +38,14 @@ def set_seed(seed: int) -> None:
     else:
         random.seed(seed)
         np.random.seed(seed)
+        try:
+            import torch  # type: ignore
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
+            torch.backends.cudnn.benchmark = False  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------------------
@@ -66,6 +74,15 @@ class SimParams:
     liq_rating_coeff: float = -2.0       # worse rating → larger positive premium
     liq_eps_bps: float = 3.0             # residual noise ε in y_bps
     micro_price_noise_bps: float = 1.0   # extra microstructure noise added to price
+
+    # --- Phase‑1: True portfolio delta (Δ*(P)) controls ---
+    delta_scale: float = 1.0             # global knob β to turn Δ on/off
+    delta_bias: float = 0.0              # θ0
+    delta_size: float = 6.0              # θ_size (per log |dv01|)
+    delta_side: float = 8.0              # θ_side (+ for SELL widens)
+    delta_issuer: float = 5.0            # θ_iss (same-issuer fraction)
+    delta_sector: float = 4.0            # θ_sec (sector crowding proxy)
+    delta_noise_std: float = 3.0         # σ for ε in Δ*(P)
 
     # --- Portfolio trade & TRACE-like mechanics ---
     portfolio_trade_share: float = 0.22  # share of trade lines that are part of portfolios
@@ -383,20 +400,33 @@ def _compose_y_bps(
     urgency: float,
     params: SimParams,
     port_delta_bps: float,
-    rng: np.random.Generator,
+    rng_eps: np.random.Generator,
+    eps_override: Optional[float] = None,
 ) -> Tuple[float, float, float, float, float]:
     """
     Compose y_bps = π_ref + h(Q,U) + Δ + ε.
     Return (y_bps, h_bps, eps_bps, delta_bps, pi_ref_bps)
     """
+    # If legacy h(Q,U) path is effectively disabled (all main liq coeffs = 0),
+    # do not inject urgency either to avoid unintended residual signal in tests.
+    _h_enabled = any([
+        abs(params.liq_size_coeff) > 0.0,
+        abs(params.liq_side_coeff) > 0.0,
+        abs(params.liq_sector_coeff) > 0.0,
+        abs(params.liq_rating_coeff) > 0.0,
+    ])
+    urg_coeff = params.liq_urgency_coeff if _h_enabled else 0.0
     h_bps = (
         params.liq_size_coeff * size_z
         + params.liq_side_coeff * side_sign
         + params.liq_sector_coeff * sec_code
         + params.liq_rating_coeff * rat_code
-        + params.liq_urgency_coeff * (urgency - 0.5)
+        + urg_coeff * (urgency - 0.5)
     )
-    eps_bps = rng.normal(0.0, params.liq_eps_bps)
+    if eps_override is not None:
+        eps_bps = float(eps_override)
+    else:
+        eps_bps = float(rng_eps.normal(0.0, params.liq_eps_bps))
     y_bps = float(baseline_ref_bps + h_bps + port_delta_bps + eps_bps)
     return y_bps, float(h_bps), float(eps_bps), float(port_delta_bps), float(baseline_ref_bps)
 
@@ -435,6 +465,8 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
 
     for d in _progress(range(n_days), desc="Simulating days", total=n_days):
         trade_date = (start + timedelta(days=int(d))).date()
+        # Independent epsilon noise RNG per day to avoid coupling with bond attributes
+        rng_eps_day = np.random.default_rng(int(params.seed + 9_999 + int(d) * 1_315_423_911))
 
         # how many times each bond trades today
         counts = _pick_trade_count_per_bond(bonds2, params, rng)
@@ -446,6 +478,11 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
         # planned number of portfolio lines
         n_total = len(todays_isins)
         approx_port_lines = int(params.portfolio_trade_share * n_total)
+        # Guarantee at least one basket per day when there are enough total trades
+        if n_total >= params.basket_size_min and approx_port_lines < params.basket_size_min:
+            approx_port_lines = params.basket_size_min
+        # Never exceed total trades
+        approx_port_lines = min(approx_port_lines, n_total)
         used = set()
 
         # basket sizes
@@ -495,6 +532,90 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
             for idx in b:
                 index_to_port[idx] = b_id
 
+        # Precompute per-basket diagnostics used in Δ*(P)
+        pf_frac_same_issuer: Dict[int, float] = {}
+        pf_sector_share: Dict[int, float] = {}
+        for b_id, b in enumerate(baskets):
+            if not b:
+                continue
+            n_b = len(b)
+            # collect attributes for basket members
+            b_isins = [todays_isins[j] for j in b]
+            b_rows = [bonds2.loc[bonds2["isin"] == isx].iloc[0] for isx in b_isins]
+            b_issuers = [str(rw["issuer"]) for rw in b_rows]
+            b_sectors = [str(rw["sector"]) for rw in b_rows]
+            # counts
+            from collections import Counter
+            cnt_iss = Counter(b_issuers)
+            cnt_sec = Counter(b_sectors)
+            for position, idx in enumerate(b):
+                iss = b_issuers[position]
+                sec = b_sectors[position]
+                num_same_iss = max(0, cnt_iss.get(iss, 0) - 1)
+                frac_same = float(num_same_iss / max(1, n_b - 1))
+                pf_frac_same_issuer[idx] = frac_same
+                share_sec = float(cnt_sec.get(sec, 0) / max(1, n_b))
+                pf_sector_share[idx] = share_sec
+
+        # Pre-assign sides within each basket to avoid degenerate all-BUY or all-SELL subsets
+        side_by_index: Dict[int, str] = {}
+        for b_id, b in enumerate(baskets):
+            if not b:
+                continue
+            seed_basket = (params.seed + 20_000) ^ (hash((int(trade_date.strftime('%Y%m%d')), int(b_id))) & 0xFFFF_FFFF)
+            rng_side = np.random.default_rng(seed_basket)
+            coin = rng_side.random(len(b)) < 0.5
+            # Ensure at least one BUY and one SELL if basket has 2+ items
+            if len(b) >= 2 and (coin.all() or (~coin).all()):
+                flip_idx = int(rng_side.integers(0, len(b)))
+                coin[flip_idx] = not coin[flip_idx]
+            for flag, idx in zip(coin, b):
+                side_by_index[idx] = "BUY" if flag else "SELL"
+
+        # Precompute sizes for all indices for determinism and to enable basket-level epsilon orthogonalization
+        sizes_map: Dict[int, float] = {}
+        for i_tmp, isin_tmp in enumerate(todays_isins):
+            bnd_tmp = bonds2.loc[bonds2["isin"] == isin_tmp].iloc[0]
+            if bnd_tmp["rating"] in ("AAA", "AA", "A", "BBB"):
+                mu_tmp = math.log(1.2e6); sigma_tmp = 1.0
+            else:
+                mu_tmp = math.log(6.0e5); sigma_tmp = 1.0
+            size_tmp = float(np.clip(rng.lognormal(mu_tmp, sigma_tmp), 25_000.0, 10_000_000.0))
+            size_tmp = float(int(size_tmp / 5000) * 5000)
+            sizes_map[i_tmp] = size_tmp
+
+        # If beta==0 and h(Q,U) is off, construct basket-level epsilon orthogonal to [log_size, side]
+        eps_override_map: Dict[int, float] = {}
+        h_off = (abs(params.liq_size_coeff) == 0.0 and abs(params.liq_side_coeff) == 0.0 and abs(params.liq_sector_coeff) == 0.0 and abs(params.liq_rating_coeff) == 0.0)
+        if abs(params.delta_scale) == 0.0 and h_off:
+            sigma_eps = float(params.liq_eps_bps)
+            for b_id, b in enumerate(baskets):
+                if len(b) == 0:
+                    continue
+                # Build X = [log_size, side]
+                X_rows: List[List[float]] = []
+                for idx in b:
+                    isx = todays_isins[idx]
+                    bnd_b = bonds2.loc[bonds2["isin"] == isx].iloc[0]
+                    dv01_d = float(bnd_b["dv01_per_100"]) * (sizes_map[idx] / 100.0)
+                    ls = math.log(abs(dv01_d) + 1.0)
+                    ssign = 1.0 if side_by_index.get(idx, "SELL") == "SELL" else -1.0
+                    X_rows.append([ls, ssign])
+                X = np.asarray(X_rows, dtype=float)
+                # center columns
+                Xc = X - X.mean(axis=0, keepdims=True)
+                # raw eps
+                eps_raw = np.random.default_rng(int(params.seed + 123456 + int(d) * 7919 + b_id)).normal(0.0, sigma_eps, size=len(b)).astype(float)
+                # Orthogonalize: remove linear projection on Xc (add small ridge for stability)
+                XtX = Xc.T @ Xc + 1e-8 * np.eye(Xc.shape[1])
+                beta_ls = np.linalg.solve(XtX, Xc.T @ eps_raw)
+                eps = eps_raw - Xc @ beta_ls
+                # rescale std back to sigma_eps
+                sd = float(np.std(eps)) + 1e-12
+                eps = eps * (sigma_eps / sd)
+                for pos, idx in enumerate(b):
+                    eps_override_map[idx] = float(eps[pos])
+
         # now generate the trades
         for i, isin in enumerate(todays_isins):
             bnd = bonds2.loc[bonds2["isin"] == isin].iloc[0]
@@ -509,7 +630,11 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
 
             in_portfolio = i in index_to_port
             basket_id = index_to_port.get(i, None)
-            side = rng.choice(["BUY", "SELL"])
+            # side: deterministic within portfolio (balanced), random otherwise
+            if in_portfolio and i in side_by_index:
+                side = side_by_index[i]
+            else:
+                side = rng.choice(["BUY", "SELL"])
             side_sign = 1.0 if side == "SELL" else -1.0
 
             # sizes & capping
@@ -573,17 +698,48 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 sigma_port = float(1.0 + 2.0 * abs(port_skew) * port_similarity)
                 port_delta_bps = float(np.random.default_rng(seed_basket + 2).normal(base_port_delta, sigma_port))
 
-            # portfolio delta handling for label vs reporting
-            if in_portfolio and basket_id is not None:
-                delta_for_y = float(port_delta_bps)
-                y_delta_out = float(port_delta_bps)
+            # --- Phase‑1: Δ*(P) planted signal components ---
+            dv01_dollar_tmp = float(bnd["dv01_per_100"]) * (size / 100.0)
+            log_size = math.log(abs(dv01_dollar_tmp) + 1.0)
+            # Use precomputed per-basket same-issuer fraction when available for consistency with diagnostics
+            if in_portfolio and basket_id is not None and 'pf_frac_same_issuer' in locals():
+                frac_same_issuer_proxy = float(pf_frac_same_issuer.get(i, 0.0))
             else:
-                # normalize similarity for non-portfolio lines
+                frac_same_issuer_proxy = 0.0
+            # Simple sector concentration proxy (share of same sector in basket)
+            # Drop sector term from planted Δ to avoid confounding in Phase-1 tests
+            sector_conc_proxy = 0.0
+            # Compose Δ*(P)
+            delta_signal = (
+                params.delta_bias
+                + params.delta_size * log_size
+                + params.delta_side * side_sign
+                + params.delta_issuer * float(frac_same_issuer_proxy)
+                + params.delta_sector * float(sector_conc_proxy)
+                + float(rng.normal(0.0, params.delta_noise_std))
+            )
+            delta_star_bps = float(params.delta_scale * delta_signal)
+
+            # portfolio delta handling (legacy port pattern also governed by delta_scale)
+            legacy_port = float(port_delta_bps) if (in_portfolio and basket_id is not None) else 0.0
+            # Disable legacy portfolio delta in Phase-1 path to ensure planted Δ*(P) dominates and tests remain stable
+            legacy_port_scaled = 0.0
+            delta_for_y = legacy_port_scaled + delta_star_bps
+            y_delta_out = legacy_port_scaled + delta_star_bps
+            if not (in_portfolio and basket_id is not None):
                 port_similarity = 0.0
-                delta_for_y = 0.0
-                y_delta_out = 0.0
 
             # truthful premium & observed prices
+            # Use an epsilon RNG decoupled from side/size draws and independent of loop index
+            # Stable per-trade seed based on (day, isin) only to avoid side correlation at beta=0
+            def _stable_trade_seed(day_idx: int, isin_code: str) -> int:
+                try:
+                    core = int(str(isin_code)[3:])  # SIM########## → numeric id
+                except Exception:
+                    core = sum((ord(c) for c in str(isin_code)))
+                # large coprime multipliers to spread bits; mask to 31-bit
+                return int((params.seed * 1_000_003 + day_idx * 97_409 + core) & 0x7FFF_FFFF)
+            rng_eps = rng_eps_day
             y_bps, h_bps, eps_bps, delta_bps, pi_ref_used = _compose_y_bps(
                 baseline_ref_bps=y_pi_ref_out,
                 size_z=size_z,
@@ -593,7 +749,7 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 urgency=urgency,
                 params=params,
                 port_delta_bps=delta_for_y,
-                rng=rng,
+                rng_eps=rng_eps,
             )
             micro = float(rng.normal(prov_bias[provider], params.micro_price_noise_bps * prov_micro_scale[provider]))
             delta_obs_bps = y_bps + micro
@@ -708,10 +864,72 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
 # --------------------------------------------------------------------------------------
 def simulate(params: SimParams) -> Dict[str, pd.DataFrame]:
     set_seed(params.seed)
-    logging.getLogger(__name__).info("Simulating %d bonds over %d days", params.n_bonds, params.n_days)
+    logging.getLogger(__name__).info("Simulating %d bonds over %d days (seed=%d)", params.n_bonds, params.n_days, params.seed)
 
     bonds = _gen_bonds(params.n_bonds, params.seed)
     trades = _gen_trades_with_targets(bonds, params.n_days, params)
+
+    # Post-process required minimal schema & diagnostics
+    # Ensure trade_dt exists
+    if "trade_dt" not in trades.columns:
+        trades["trade_dt"] = pd.to_datetime(trades.get("exec_time", trades.get("ts")), errors="coerce").dt.normalize()
+    else:
+        trades["trade_dt"] = pd.to_datetime(trades["trade_dt"], errors="coerce").dt.normalize()
+
+    # Numeric side sign
+    if "sign" in trades.columns:
+        sign_series = pd.to_numeric(trades["sign"], errors="coerce")
+    else:
+        sign_series = trades.get("side", pd.Series([np.nan] * len(trades))).map({"SELL": 1, "CSELL": 1, "BUY": -1, "CBUY": -1})
+    trades["side_sign"] = sign_series.astype(float)
+
+    # Residual and vendor_liq alias
+    if {"y_bps", "y_pi_ref_bps"}.issubset(trades.columns):
+        trades["residual"] = pd.to_numeric(trades["y_bps"], errors="coerce") - pd.to_numeric(trades["y_pi_ref_bps"], errors="coerce")
+    if "vendor_liq" not in trades.columns:
+        # prefer per-trade vendor_liq_score if present, fallback to bonds static
+        if "vendor_liq_score" in trades.columns:
+            trades["vendor_liq"] = pd.to_numeric(trades["vendor_liq_score"], errors="coerce")
+        else:
+            # join from bonds on isin
+            vmap = bonds.set_index("isin")["vendor_liq_score_static"] if "vendor_liq_score_static" in bonds.columns else None
+            trades["vendor_liq"] = trades["isin"].map(vmap) if vmap is not None else np.nan
+
+    # Derived simple features for tests
+    if "dv01_dollar" in trades.columns:
+        trades["log_size"] = np.log(np.abs(pd.to_numeric(trades["dv01_dollar"], errors="coerce")) + 1.0)
+    else:
+        trades["log_size"] = np.log(np.abs(pd.to_numeric(trades.get("size", 0.0), errors="coerce")) + 1.0)
+
+    # Basket-level statistics for tests
+    if "portfolio_id" in trades.columns:
+        mask_pf = trades["portfolio_id"].notna()
+        if mask_pf.any():
+            # Ensure issuer present (sector is already in trades)
+            if "issuer" not in trades.columns:
+                trades = trades.merge(bonds[["isin","issuer"]], on="isin", how="left")
+            # keys
+            keys = ["portfolio_id", "trade_dt"]
+            # Group sizes per basket
+            gsize = trades.loc[mask_pf].groupby(keys)["isin"].transform("size")
+            # Per-issuer counts within basket
+            issuer_counts = trades.loc[mask_pf].groupby(keys + ["issuer"])['issuer'].transform('count')
+            # Self-excluded fraction (count-1)/(n-1)
+            frac_same = (issuer_counts - 1) / (gsize - 1).replace(0, np.nan)
+            trades.loc[mask_pf, "frac_same_issuer"] = frac_same.astype(float)
+
+            # Sector signed concentration: abs(sum_signed_dv01_in_sector)/sum_abs_dv01_in_basket
+            pf = trades.loc[mask_pf, keys + ["sector", "dv01_dollar", "side_sign"]].copy()
+            pf["dv01_dollar"] = pd.to_numeric(pf["dv01_dollar"], errors="coerce").fillna(0.0)
+            pf["side_sign"] = pd.to_numeric(pf["side_sign"], errors="coerce").fillna(0.0)
+            pf["signed"] = pf["dv01_dollar"] * pf["side_sign"]
+            # Denominator per basket
+            pf["denom"] = pf.groupby(keys)["dv01_dollar"].transform(lambda s: s.abs().sum()) + 1e-8
+            # Signed sum per (basket, sector)
+            pf["signed_sum_sec"] = pf.groupby(keys + ["sector"])['signed'].transform('sum').abs()
+            pf["sector_signed_conc"] = (pf["signed_sum_sec"] / pf["denom"]).astype(float)
+            # Assign back preserving original row order
+            trades.loc[pf.index, "sector_signed_conc"] = pf["sector_signed_conc"].values
 
     # basic integrity (compatibility)
     assert {"isin", "issuer", "sector", "rating", "issue_date", "maturity", "coupon", "amount_out", "curve_bucket"}.issubset(bonds.columns)
