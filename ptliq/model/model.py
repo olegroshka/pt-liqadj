@@ -397,10 +397,10 @@ class GraphEncoder(nn.Module):
         out_per_head = d_model // heads
 
         self.conv1 = GATv2Conv(d_model, out_per_head, heads=heads,
-                               edge_dim=edge_dim, dropout=dropout, add_self_loops=True)
+                               edge_dim=edge_dim, dropout=dropout, add_self_loops=False)
         self.bn1   = PygBatchNorm(d_model)
         self.conv2 = GATv2Conv(d_model, out_per_head, heads=heads,
-                               edge_dim=edge_dim, dropout=dropout, add_self_loops=True)
+                               edge_dim=edge_dim, dropout=dropout, add_self_loops=False)
         self.bn2   = PygBatchNorm(d_model)
 
     def _edge_attr(self, edge_type: torch.Tensor, edge_weight: Optional[torch.Tensor]) -> torch.Tensor:
@@ -447,7 +447,7 @@ class CorrDifferentialRefiner(nn.Module):
         super().__init__()
         try:
             # edge_dim=1 because we pass only scalar weights
-            self.gat = GATv2Conv(d_model, d_model // 4, heads=4, edge_dim=1, add_self_loops=True)
+            self.gat = GATv2Conv(d_model, d_model // 4, heads=4, edge_dim=1, add_self_loops=False)
         except Exception:
             # In non-PyG env for some unit tests, provide a stub
             class _Stub(nn.Module):

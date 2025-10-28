@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json, re
+import copy
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils import clip_grad_norm_
 from torch_geometric.data import Data
+import math
+from torch.optim.lr_scheduler import LambdaLR
 
 # Optional progress bar
 try:
@@ -27,6 +30,27 @@ except Exception:  # pragma: no cover - tensorboard is optional
 
 from ptliq.model.model import LiquidityModelGAT
 from ptliq.model.losses import composite_loss
+
+# ---------------------------
+# EMA helper for stability
+# ---------------------------
+class ModelEMA:
+    def __init__(self, model: torch.nn.Module, decay: float = 0.995):
+        self.ema = copy.deepcopy(model).eval()
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+        self.decay = float(decay)
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        d = self.decay
+        for p_ema, p in zip(self.ema.parameters(), model.parameters()):
+            if p.requires_grad:
+                p_ema.data.mul_(d).add_(p.data, alpha=1.0 - d)
+
+    def to(self, device: torch.device) -> "ModelEMA":
+        self.ema.to(device)
+        return self
 
 # ---------------------------
 # Configs
@@ -621,6 +645,27 @@ def train_gat(
     # opt/sched
     opt = torch.optim.AdamW(model.parameters(), lr=_safe_float(run_cfg.train.lr, 1e-3),
                             weight_decay=_safe_float(run_cfg.train.weight_decay, 1e-4))
+    # Learning-rate warmup + cosine via a single LambdaLR stepped per-iteration
+    try:
+        steps_per_epoch = max(1, len(train_loader))
+        total_steps = max(steps_per_epoch * int(run_cfg.train.max_epochs), 1)
+        warmup_steps = min(100, steps_per_epoch * 2)
+        start_factor = 0.2
+        cosine_steps = max(total_steps - warmup_steps, 1)
+        def lr_lambda(step: int) -> float:
+            # step is the global optimizer step index (0-based)
+            if step < warmup_steps:
+                # linear warmup from start_factor to 1.0
+                return float(start_factor + (1.0 - start_factor) * (step / max(1, warmup_steps)))
+            t = (step - warmup_steps) / float(cosine_steps)
+            t = min(max(t, 0.0), 1.0)
+            return float(0.5 * (1.0 + math.cos(math.pi * t)))
+        sched = LambdaLR(opt, lr_lambda=lr_lambda)
+    except Exception:
+        sched = None  # scheduler optional
+    # EMA of weights for eval
+    ema = ModelEMA(model, decay=0.995).to(dev)
+
     best = float("inf"); best_rmse = float("inf"); best_ep = -1; patience_left = int(run_cfg.train.patience)
 
     outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
@@ -651,12 +696,25 @@ def train_gat(
         except Exception:
             writer = None
 
-    def beta_schedule(epoch: int, warmup: int = 4, target: float = 0.3, ramp: int = 8) -> float:
-        return 0.0
-        if epoch <= warmup: return 0.0
+    def beta_schedule(epoch: int, warmup: int = 2, target: float = 0.6, ramp: int = 8) -> float:
+        """Gentle monotone ramp for beta: 0 for first `warmup` epochs, then linear to `target` over `ramp` epochs."""
+        if epoch <= warmup:
+            return 0.0
         e = epoch - warmup
-        if e >= ramp: return target
+        if e >= ramp:
+            return target
         return target * (e / ramp)
+
+    def loss_weight_schedule(epoch: int) -> Dict[str, float]:
+        # Warm up on Huber, then ramp q50 up while dialing Huber down.
+        # Keep non-crossing on throughout; delay width-monotonicity until epoch 6.
+        if epoch <= 2:
+            return dict(alpha=0.0, lambda_huber=1.0, lambda_noncross=0.10, lambda_wmono=0.0)
+        elif epoch <= 5:
+            frac = (epoch - 2) / 3.0
+            return dict(alpha=0.5 * frac + 0.1, lambda_huber=1.0 - 0.7*frac, lambda_noncross=0.10, lambda_wmono=0.0)
+        else:
+            return dict(alpha=1.0, lambda_huber=0.2, lambda_noncross=0.10, lambda_wmono=0.10)
 
     # train
     global_step = 0
@@ -687,14 +745,34 @@ def train_gat(
 
             bf   = batch.get("baseline_feats", torch.empty(0)).to(dev) if isinstance(batch, dict) else None
             out = model.forward_from_data(data, tgt, pidx, pbat, pw, baseline_feats=bf)
-            # mild ramp on q90 weight
-            losses = composite_loss(out, r, Lr, alpha=1.0, beta=beta_schedule(ep), gamma=0.1, delta_huber=1.0)
+            # schedule the weights: emphasis on Huber early, then q50
+            wts = loss_weight_schedule(ep)
+            losses = composite_loss(
+                out, r, Lr,
+                alpha=wts['alpha'],
+                beta=beta_schedule(ep),
+                gamma=0.1,
+                delta_huber=1.0,
+                lambda_huber=wts['lambda_huber'],
+                lambda_noncross=wts['lambda_noncross'],
+                lambda_wmono=wts['lambda_wmono']
+            )
 
             opt.zero_grad(set_to_none=True)
             losses["total"].backward()
             # gradient/global norm (pre-clipping) returned by clip_grad_norm_
             grad_norm = clip_grad_norm_(model.parameters(), float(run_cfg.train.clip_grad))
             opt.step()
+            # scheduler + EMA updates
+            try:
+                if sched is not None:
+                    sched.step()
+            except Exception:
+                pass
+            try:
+                ema.update(model)
+            except Exception:
+                pass
 
             B = int(tgt.numel())
             with torch.no_grad():
@@ -734,6 +812,8 @@ def train_gat(
                     writer.add_scalar("train/loss", float(losses["total"].item()), global_step)
                     writer.add_scalar("train/mae", float(mae.item()), global_step)
                     writer.add_scalar("train/rmse", float(torch.sqrt(mse).item()), global_step)
+                    # Mean–median gap (diagnostic)
+                    writer.add_scalar("train/mean_median_gap", float((dm - q50).abs().mean().item()), global_step)
                     # Quantile diagnostics per batch
                     writer.add_scalar("train/q50_min", float(q50_min.item()), global_step)
                     writer.add_scalar("train/q50_max", float(q50_max.item()), global_step)
@@ -810,7 +890,8 @@ def train_gat(
         except Exception:
             attn_rel = []
 
-        val_metrics = eval_epoch(model, data, val_loader, dev)
+        # Evaluate with EMA-smoothed weights for stability
+        val_metrics = eval_epoch(ema.ema if ema is not None else model, data, val_loader, dev)
         val_mae = float(val_metrics["mae"])
         val_rmse = float(val_metrics.get("rmse", float("nan")))
 
@@ -878,6 +959,7 @@ def train_gat(
                          "num_relations": num_rel,
                          "model": asdict(run_cfg.model)},
                 "state_dict": model.state_dict(),
+                "ema_state_dict": ema.ema.state_dict(),
                 "best": {"epoch": best_ep, "val_mae": float(best), "val_rmse": float(val_rmse)},
                 "train_config": asdict(run_cfg.train),
             }

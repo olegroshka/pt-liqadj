@@ -43,6 +43,7 @@ def composite_loss(
     beta: float  = 0.8,       # q90 pinball
     gamma: float = 0.1,       # monotonicity of mean vs L
     delta_huber: float = 1.0,
+    lambda_huber: float = 1.0, # weight for Huber term
     # guardrails
     lambda_noncross: float = 0.10,
     noncross_eps: float = 1e-4,
@@ -67,7 +68,7 @@ def composite_loss(
     mask = (DL > 0)
     wmono = torch.relu(torch.tensor(wmono_margin, dtype=W.dtype, device=W.device) - DW)[mask].mean() if mask.any() else torch.zeros((), device=r.device)
 
-    total = huber + alpha*q50 + beta*q90 + gamma*mono + lambda_noncross*nc + lambda_wmono*wmono
+    total = (lambda_huber * huber) + alpha*q50 + beta*q90 + gamma*mono + lambda_noncross*nc + lambda_wmono*wmono
     return {
         'total': total, 'huber': huber, 'q50': q50, 'q90': q90,
         'mono': mono, 'noncross': nc, 'wpen': wmono, 'width_mean': W.mean()
