@@ -27,6 +27,7 @@ class MultiViewDGT(nn.Module):
         mkt_dim: int = 0,
         use_portfolio: bool = True,
         use_market: bool = True,
+        trade_dim: int = 0,
     ):
         super().__init__()
         if TransformerConv is None:
@@ -59,9 +60,9 @@ class MultiViewDGT(nn.Module):
         self.conv1 = nn.ModuleDict({v: _conv() for v in self.view_names})
         self.conv2 = nn.ModuleDict({v: _conv() for v in self.view_names})
 
-        # learnable scalar gates (one per view)
-        self.g1 = nn.ParameterDict({v: nn.Parameter(torch.tensor(0.25)) for v in self.view_names})
-        self.g2 = nn.ParameterDict({v: nn.Parameter(torch.tensor(0.25)) for v in self.view_names})
+        # learnable scalar gates (one per view) — logit parameterization, then sigmoid to [0,1]
+        self.g1_logit = nn.ParameterDict({v: nn.Parameter(torch.zeros(())) for v in self.view_names})
+        self.g2_logit = nn.ParameterDict({v: nn.Parameter(torch.zeros(())) for v in self.view_names})
 
         self.norm1 = nn.LayerNorm(hidden)
         self.norm2 = nn.LayerNorm(hidden)
@@ -77,11 +78,20 @@ class MultiViewDGT(nn.Module):
         else:
             self.mkt_enc = None
 
-        # regression head (anchor [+ optional portfolio, market])
+        # trade encoder (optional)
+        self.trade_enc = nn.Sequential(
+            nn.Linear(trade_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+        ) if trade_dim and trade_dim > 0 else None
+
+        # regression head (anchor [+ optional portfolio, market, trade])
         in_head = hidden
         if self.use_portfolio:
             in_head += hidden
         if self.use_market:
+            in_head += hidden
+        if self.trade_enc is not None:
             in_head += hidden
         self.head = nn.Sequential(
             nn.Linear(in_head, hidden),
@@ -103,7 +113,8 @@ class MultiViewDGT(nn.Module):
         ew_s = self.edge_weight_all[getattr(self, "mask_struct")]
 
         convs = self.conv1 if layer == 1 else self.conv2
-        g     = self.g1    if layer == 1 else self.g2
+        glog  = self.g1_logit if layer == 1 else self.g2_logit
+        g     = {k: torch.sigmoid(v) for k, v in glog.items()}
 
         h_s = convs["struct"](x, ei_s, edge_attr=ew_s)
 
@@ -113,13 +124,16 @@ class MultiViewDGT(nn.Module):
                 return torch.zeros_like(h_s)
             ei = self.edge_index_all[:, mask]
             ew = self.edge_weight_all[mask]
+            # per-view standardization to remove scale mismatch
+            # Use population std (unbiased=False) to avoid NaNs for single-edge views
+            ew = (ew - ew.mean()) / (ew.std(unbiased=False) + 1e-6)
             return convs[view](x, ei, edge_attr=ew)
 
         h_port = _msg("port")
         h_cg   = _msg("corr_global")
         h_cl   = _msg("corr_local")
 
-        # differential fusion wrt structural
+        # differential fusion wrt structural with gated contributions in [0,1]
         h = x + g["struct"]*h_s \
               + g["port"]*(h_port - h_s) \
               + g["corr_global"]*(h_cg - h_s) \
@@ -160,7 +174,8 @@ class MultiViewDGT(nn.Module):
         anchor_idx: torch.Tensor,           # [B]
         market_feat: Optional[torch.Tensor] = None,   # [B, mkt_dim]
         pf_gid: Optional[torch.Tensor] = None,        # [B]
-        port_ctx: Optional[dict] = None
+        port_ctx: Optional[dict] = None,
+        trade_feat: Optional[torch.Tensor] = None,    # [B, trade_dim]
     ) -> torch.Tensor:
         # encode nodes
         h0 = self.norm0(self.enc(x))
@@ -185,6 +200,10 @@ class MultiViewDGT(nn.Module):
         if self.use_market and (market_feat is not None):
             z_mkt = self.mkt_enc(market_feat)
             z_list.append(z_mkt)
+
+        if (self.trade_enc is not None) and (trade_feat is not None):
+            z_trade = self.trade_enc(trade_feat)
+            z_list.append(z_trade)
 
         z = torch.cat(z_list, dim=1)
         yhat = self.head(z).squeeze(-1)   # [B]

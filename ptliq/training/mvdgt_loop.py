@@ -79,10 +79,15 @@ class _DS(torch.utils.data.Dataset):
 
     def __getitem__(self, i: int):
         r = self.df.iloc[i]
+        # side_sign, log_size may be absent in older datasets; default to 0.0
+        side_sign = float(getattr(r, "side_sign", 0.0))
+        log_size = float(getattr(r, "log_size", 0.0))
         return {
             "node_id": int(r.node_id),
             "date_idx": int(r.date_idx),
             "pf_gid": int(r.pf_gid),
+            "side_sign": side_sign,
+            "log_size": log_size,
             "y": float(r.y),
         }
 
@@ -144,10 +149,25 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
         mkt_dim=mkt_dim,
         use_portfolio=True,
         use_market=(mkt_dim > 0),
+        trade_dim=2,
     ).to(device)
 
+    # standardized residuals stats from train split
+    y_tr = pd.read_parquet(workdir / "samples.parquet")
+    y_tr = y_tr[y_tr["split"] == "train"]["y"].astype(float).to_numpy()
+    y_mu  = torch.tensor(float(y_tr.mean()), device=device)
+    y_std = torch.tensor(float(max(y_tr.std(), 1e-6)), device=device)
+
     opt = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr), weight_decay=float(cfg.weight_decay))
-    loss_fn = torch.nn.MSELoss()
+    sched = torch.optim.lr_scheduler.OneCycleLR(
+        opt,
+        max_lr=float(cfg.lr),
+        steps_per_epoch=len(tr_loader),
+        epochs=int(cfg.epochs),
+        pct_start=0.1,
+        anneal_strategy="cos",
+    )
+    loss_fn = torch.nn.SmoothL1Loss(reduction="none")
 
     # TensorBoard writer (optional)
     writer = None
@@ -170,7 +190,7 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     def _run(loader, train_flag=False, epoch: int = 0, phase: str = "train"):
         nonlocal global_step
         model.train(train_flag)
-        tot_loss, tot_abs, n = 0.0, 0.0, 0
+        tot_mse_bps, tot_mae_bps, n = 0.0, 0.0, 0
         it = _tqdm(loader, total=len(loader), leave=False, desc=f"{phase} ep{epoch:03d}")
         with torch.set_grad_enabled(train_flag):
             for i, batch in enumerate(it, start=1):
@@ -183,15 +203,34 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
                     mkt = mkt_ctx["mkt_feat"].index_select(0, di)
                 else:
                     mkt = None
-                yhat = model(x, anchor_idx=anchor, market_feat=mkt, pf_gid=pf_gid, port_ctx=port_ctx)
-                loss = loss_fn(yhat, y)
+                # trade features
+                trade = torch.stack([
+                    batch["side_sign"].float().to(device),
+                    batch["log_size"].float().to(device),
+                ], dim=1)
+
+                yhat = model(x, anchor_idx=anchor, market_feat=mkt, pf_gid=pf_gid, port_ctx=port_ctx, trade_feat=trade)
+
+                # standardized error; robust loss with portfolio weighting
+                err = yhat - y
+                err_z = err / y_std
+                w = torch.ones_like(err_z)
+                w = w * (1.0 + 1.0 * (pf_gid >= 0).float())  # double-weight portfolio trades
+                loss_vec = loss_fn(err_z, torch.zeros_like(err_z))
+                loss = (w * loss_vec).mean()
+
                 if train_flag:
                     opt.zero_grad(set_to_none=True)
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     opt.step()
+                    sched.step()
                 bsz = int(y.size(0))
-                tot_loss += float(loss.item()) * bsz
-                tot_abs += float(torch.abs(yhat.detach() - y).mean().item()) * 1.0  # batch MAE mean
+                # accumulate true bps metrics
+                batch_mse = float((err.detach() ** 2).mean().item())
+                batch_mae = float(torch.abs(err.detach()).mean().item())
+                tot_mse_bps += batch_mse * bsz
+                tot_mae_bps += batch_mae * bsz
                 n += bsz
 
                 # per-batch logging
@@ -201,12 +240,13 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
                     if cfg.enable_tqdm and tqdm is not None:
                         it.set_postfix({"loss": f"{float(loss.item()):.4f}"})
                     global_step += 1
-        avg_loss = tot_loss / max(1, n)
-        avg_mae = (tot_abs / max(1, len(loader))) if len(loader) > 0 else 0.0
+        avg_mse = tot_mse_bps / max(1, n)
+        avg_rmse = avg_mse ** 0.5
+        avg_mae = tot_mae_bps / max(1, n)
         if writer is not None:
-            writer.add_scalar(f"{phase}/loss", float(avg_loss), epoch)
-            writer.add_scalar(f"{phase}/mae", float(avg_mae), epoch)
-        return avg_loss, avg_mae
+            writer.add_scalar(f"{phase}/rmse_bps", float(avg_rmse), epoch)
+            writer.add_scalar(f"{phase}/mae_bps", float(avg_mae), epoch)
+        return avg_mse, avg_mae
 
     best = 1e9
     best_state = None
