@@ -86,3 +86,7 @@ def app_main(
 
     metrics = train_gat(features_run_dir, trades, outdir, run_cfg, ranges_json=ranges, graph_dir=graph_dir)
     print(f"[OK] saved under {outdir}  |  best={metrics}")
+
+
+if __name__ == "__main__":
+    app()

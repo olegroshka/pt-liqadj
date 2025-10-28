@@ -10,7 +10,7 @@ train:
   device: auto
   max_epochs: 25
   batch_size: 32
-  lr: 1.0e-3
+  lr: 3.0e-4
   weight_decay: 1.0e-4
   patience: 5
   seed: 42

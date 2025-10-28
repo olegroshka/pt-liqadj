@@ -626,6 +626,46 @@ def train_gat(
     train_loader = DataLoader(train_ds, batch_size=int(run_cfg.train.batch_size), shuffle=True,  collate_fn=port_collate, drop_last=False)
     val_loader   = DataLoader(val_ds,   batch_size=int(run_cfg.train.batch_size), shuffle=False, collate_fn=port_collate, drop_last=False)
 
+    # --- label normalization from train set ---
+    y_train = np.array([samples[i].residual for i in idx_train], dtype=float)
+    y_mean  = float(np.nanmean(y_train))
+    mad = float(np.nanmedian(np.abs(y_train - np.nanmedian(y_train)))) * 1.4826
+    y_std  = float(mad if mad > 1e-6 else np.nanstd(y_train) + 1e-6)
+    print(f"[label norm] mean={y_mean:.3f} bps, scale={y_std:.3f} bps")
+
+    def _znorm_y(t: torch.Tensor) -> torch.Tensor:
+        return (t - y_mean) / y_std
+
+    def _znorm_pred(pred: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        return {
+            'delta_mean': (pred['delta_mean'] - y_mean) / y_std,
+            'q50':        (pred['q50']        - y_mean) / y_std,
+            'q90':        (pred['q90']        - y_mean) / y_std,
+        }
+
+    # --- simple baseline: OLS on [const, sign, log_size] from train split ---
+    try:
+        Xb, yb = [], []
+        for i in idx_train:
+            log_size, sgn = samples[i].base_feats  # [log_size, sign]
+            Xb.append([1.0, float(sgn), float(log_size)])
+            yb.append(float(samples[i].residual))
+        w_ls, *_ = np.linalg.lstsq(np.asarray(Xb), np.asarray(yb), rcond=None)
+        print(f"[baseline OLS] w={w_ls}")
+        # Precompute baseline MAE on validation split
+        Xv, yv = [], []
+        for i in idx_val:
+            log_size, sgn = samples[i].base_feats
+            Xv.append([1.0, float(sgn), float(log_size)])
+            yv.append(float(samples[i].residual))
+        Xv = np.asarray(Xv); yv = np.asarray(yv)
+        yv_hat = Xv @ w_ls
+        baseline_val_mae = float(np.mean(np.abs(yv_hat - yv))) if yv.size > 0 else float("nan")
+    except Exception as e:
+        print(f"[baseline OLS] failed: {e}")
+        w_ls = None
+        baseline_val_mae = float("nan")
+
     # model
     num_rel = int(data.edge_type.max().item() + 1)
     model = LiquidityModelGAT(
@@ -745,17 +785,21 @@ def train_gat(
 
             bf   = batch.get("baseline_feats", torch.empty(0)).to(dev) if isinstance(batch, dict) else None
             out = model.forward_from_data(data, tgt, pidx, pbat, pw, baseline_feats=bf)
-            # schedule the weights: emphasis on Huber early, then q50
+            # schedule the weights: emphasis on Huber early, then q50; delay q90
             wts = loss_weight_schedule(ep)
+            # normalize labels and predictions only inside the loss
+            pred_n = _znorm_pred(out)
+            r_n    = _znorm_y(r)
             losses = composite_loss(
-                out, r, Lr,
+                pred_n, r_n, Lr,
                 alpha=wts['alpha'],
-                beta=beta_schedule(ep),
+                beta=(0.0 if ep <= 10 else 0.2),  # start quantiles late and small
                 gamma=0.1,
-                delta_huber=1.0,
+                delta_huber=1.0,                  # 1.0 now in normalized units
                 lambda_huber=wts['lambda_huber'],
                 lambda_noncross=wts['lambda_noncross'],
-                lambda_wmono=wts['lambda_wmono']
+                lambda_wmono=wts['lambda_wmono'],
+                lambda_wsize=0.005
             )
 
             opt.zero_grad(set_to_none=True)
@@ -901,6 +945,7 @@ def train_gat(
                 "epoch": ep,
                 "train_mae": train_mae,
                 "train_rmse": train_rmse,
+                "baseline_mae": baseline_val_mae,
                 "train": {
                     "cov50": cov50_tr, "cov90": cov90_tr,
                     "width_mean": width_mean_tr, "width_std": width_std_tr,
@@ -938,6 +983,11 @@ def train_gat(
                 writer.add_scalar("epoch/val_cov90", float(val_metrics["cov90"]), ep)
                 writer.add_scalar("epoch/val_width_mean", float(val_metrics["width_mean"]), ep)
                 writer.add_scalar("epoch/val_width_std", float(val_metrics["width_std"]), ep)
+                # Baseline (vendor-only) MAE for comparison
+                try:
+                    writer.add_scalar("epoch/baseline_mae", float(baseline_val_mae), ep)
+                except Exception:
+                    pass
                 # learning rate (first param group)
                 try:
                     lr0 = float(opt.param_groups[0].get("lr", float("nan")))

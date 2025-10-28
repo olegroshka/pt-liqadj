@@ -528,12 +528,17 @@ class LiquidityModelGAT(nn.Module):
         )
         # Optional differential refinement over correlation edges only
         if getattr(self, "encoder_type", "gat") == "gat_diff":
-            mask = getattr(data, "corr_edge_mask", None)
-            if mask is not None and mask.numel() == data.edge_index.size(1):
-                ei_corr = data.edge_index[:, mask]
-                ew_corr = data.edge_weight[mask] if hasattr(data, "edge_weight") and data.edge_weight is not None else torch.zeros(mask.sum().item(), device=h.device, dtype=h.dtype)
-                if ei_corr.numel() > 0:
-                    h = self.corr_refiner(h, ei_corr, ew_corr)
+            if not hasattr(data, "corr_edge_mask"):
+                if not hasattr(self, "_warned_no_corr"):
+                    print("[warn] gat_diff selected but data.corr_edge_mask missing – running as plain GAT.")
+                    self._warned_no_corr = True
+            else:
+                mask = getattr(data, "corr_edge_mask", None)
+                if mask is not None and mask.numel() == data.edge_index.size(1):
+                    ei_corr = data.edge_index[:, mask]
+                    ew_corr = data.edge_weight[mask] if hasattr(data, "edge_weight") and data.edge_weight is not None else torch.zeros(mask.sum().item(), device=h.device, dtype=h.dtype)
+                    if ei_corr.numel() > 0:
+                        h = self.corr_refiner(h, ei_corr, ew_corr)
         return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight, baseline_feats=baseline_feats)
 
 # Alias for notebooks

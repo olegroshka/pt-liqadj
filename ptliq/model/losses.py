@@ -49,6 +49,8 @@ def composite_loss(
     noncross_eps: float = 1e-4,
     lambda_wmono: float = 0.10,  # width non-decreasing in L
     wmono_margin: float = 0.0,
+    # size prior
+    lambda_wsize: float = 0.00   # tiny L1 prior on mean width
 ) -> Dict[str, torch.Tensor]:
     r = r_true.view(-1, 1)
     L = lref_target.view(-1, 1)
@@ -68,7 +70,8 @@ def composite_loss(
     mask = (DL > 0)
     wmono = torch.relu(torch.tensor(wmono_margin, dtype=W.dtype, device=W.device) - DW)[mask].mean() if mask.any() else torch.zeros((), device=r.device)
 
-    total = (lambda_huber * huber) + alpha*q50 + beta*q90 + gamma*mono + lambda_noncross*nc + lambda_wmono*wmono
+    total = (lambda_huber * huber) + alpha*q50 + beta*q90 + gamma*mono + lambda_noncross*nc + lambda_wmono*wmono \
+            + (lambda_wsize * W.mean())
     return {
         'total': total, 'huber': huber, 'q50': q50, 'q90': q90,
         'mono': mono, 'noncross': nc, 'wpen': wmono, 'width_mean': W.mean()
