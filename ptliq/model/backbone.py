@@ -196,6 +196,8 @@ class LiquidityResidualBackbone(nn.Module):
         z = torch.cat([targets, contexts, fused], dim=-1)
         z = self.fuse_ln(z)
         z = self.fuse(z)
-        if (self.baseline_proj is not None) and (baseline_feats is not None) and baseline_feats.numel() > 0:
-            z = z + self.baseline_proj(baseline_feats)
+        # Important: portfolio tower predicts pure deltas. Do NOT inject baseline features here.
+        # Any baseline MLP/tower must be used outside to compute baseline_mean and summed downstream when needed.
+        # if (self.baseline_proj is not None) and (baseline_feats is not None) and baseline_feats.numel() > 0:
+        #     z = z + self.baseline_proj(baseline_feats)
         return self.heads(z)

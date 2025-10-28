@@ -883,9 +883,19 @@ def simulate(params: SimParams) -> Dict[str, pd.DataFrame]:
         sign_series = trades.get("side", pd.Series([np.nan] * len(trades))).map({"SELL": 1, "CSELL": 1, "BUY": -1, "CBUY": -1})
     trades["side_sign"] = sign_series.astype(float)
 
-    # Residual and vendor_liq alias
+    # Residual contract and vendor_liq alias
     if {"y_bps", "y_pi_ref_bps"}.issubset(trades.columns):
-        trades["residual"] = pd.to_numeric(trades["y_bps"], errors="coerce") - pd.to_numeric(trades["y_pi_ref_bps"], errors="coerce")
+        # Build explicit baseline and residual consistent with contract:
+        # pi_ref_bps = provider_baseline + deterministic size/side/urgency term
+        if "y_h_bps" in trades.columns:
+            trades["pi_ref_bps"] = pd.to_numeric(trades["y_pi_ref_bps"], errors="coerce") + pd.to_numeric(trades["y_h_bps"], errors="coerce")
+        else:
+            # Fallback: if h_bps missing, use provider baseline only
+            trades["pi_ref_bps"] = pd.to_numeric(trades["y_pi_ref_bps"], errors="coerce")
+        # residual_bps = y_bps - pi_ref_bps = delta_port + eps
+        trades["residual_bps"] = pd.to_numeric(trades["y_bps"], errors="coerce") - pd.to_numeric(trades["pi_ref_bps"], errors="coerce")
+        # Backward-compat alias for older codepaths/tests
+        trades["residual"] = trades["residual_bps"].astype(float)
     if "vendor_liq" not in trades.columns:
         # prefer per-trade vendor_liq_score if present, fallback to bonds static
         if "vendor_liq_score" in trades.columns:
