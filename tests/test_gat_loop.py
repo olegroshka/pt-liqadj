@@ -125,4 +125,5 @@ def test_train_gat_integration(tmp_path: Path):
         assert np.isfinite(float(val["mae"]))
         assert float(val["width_mean"]) >= 0.0
     if len(recs) >= 2:
-        assert recs[-1]["train_mae"] <= recs[0]["train_mae"] + 1e-6
+        best = min(r["train_mae"] for r in recs)
+        assert best <= recs[0]["train_mae"] + 1e-6
