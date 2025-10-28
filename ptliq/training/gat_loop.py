@@ -205,6 +205,7 @@ class Sample:
     liq_ref: float
     dt_ord: int
     base_feats: List[float]
+    ctx_feats: List[float]  # [log_sum_abs_w, signed_frac, frac_same_issuer]
 
 def _extract_pf_base(x: str) -> Optional[str]:
     if not isinstance(x, str): return None
@@ -416,9 +417,14 @@ def build_samples(
             log_size = float(np.log1p(abs(float(size_raw))))
             sgn = float(row["sign"]) if pd.notna(row["sign"]) else 0.0
             base_feats = [log_size, sgn]  # keep small & stable; urgency can be appended later
-            samples.append(Sample(tgt_node, port_nodes, port_weights, r, L, group_dt_ord, base_feats))
-            #base_feats = [float(np.log1p(abs(float(row.get("dv01_dollar", 0.0))))), float(row.get("_sign", 0.0))]
-            #samples.append(Sample(tgt_node, port_nodes, port_weights, r, L, group_dt_ord, base_feats))
+
+            sum_signed_w_raw = float((ctx["_sign"] * _dv01_dollar(ctx)).sum())
+            log_sum_abs = float(np.log1p(max(sum_abs_w_raw, 0.0)))
+            signed_frac = float(sum_signed_w_raw) / (float(sum_abs_w_raw) + 1e-6)
+            # frac_same_issuer already computed as `frac_same_issuer`
+            ctx_feats = [log_sum_abs, signed_frac, float(frac_same_issuer)]
+
+            samples.append(Sample(tgt_node, port_nodes, port_weights, r, L, group_dt_ord, base_feats, ctx_feats))
 
     # Sanity: unique (target, day) pairs vs total samples
     try:
@@ -487,9 +493,24 @@ def port_collate(batch: List[Sample]) -> Dict[str, torch.Tensor]:
             baseline_feats = torch.zeros((B, 2), dtype=torch.float32)
     except Exception:
         baseline_feats = torch.zeros((B, 2), dtype=torch.float32)
-    return dict(target_index=tgt, port_index=port_index, port_batch=port_batch,
-                port_weight=port_weight, residual=residual, liq_ref=liq_ref,
-                baseline_feats=baseline_feats, sizes=sizes, port_abs_sum=port_abs_sum)
+
+    # Context scalars: tolerate legacy samples without ctx_feats
+    try:
+        ctx_feats_list = [b.ctx_feats if hasattr(b, "ctx_feats") and b.ctx_feats is not None else [0.0, 0.0, 0.0] for b in batch]
+    except Exception:
+        ctx_feats_list = [[0.0, 0.0, 0.0] for _ in batch]
+    ctx_feats = torch.tensor(ctx_feats_list, dtype=torch.float32)
+
+    return dict(target_index=tgt,
+                port_index=port_index,
+                port_batch=port_batch,
+                port_weight=port_weight,
+                residual=residual,
+                liq_ref=liq_ref,
+                baseline_feats=baseline_feats,
+                sizes=sizes,
+                port_abs_sum=port_abs_sum,
+                ctx_feats=ctx_feats)
 
 # ---------------------------
 # Evaluation metrics (VAL)
@@ -506,7 +527,17 @@ def eval_epoch(model: LiquidityModelGAT, data: Data, loader: DataLoader, device:
         r    = batch["residual"].to(device)
 
         bf   = batch.get("baseline_feats", torch.empty(0)).to(device) if isinstance(batch, dict) else None
-        out = model.forward_from_data(data, tgt, pidx, pbat, pw, baseline_feats=bf)
+
+        out = model.forward_from_data(
+            data,
+            tgt,
+            pidx,
+            pbat,
+            pw,
+            baseline_feats=bf,
+            ctx_feats=batch["ctx_feats"].to(device)
+        )
+
         preds_m.append(out["delta_mean"].flatten())
         preds50.append(out["q50"].flatten())
         preds90.append(out["q90"].flatten())
@@ -847,7 +878,7 @@ def train_gat(
             Lr   = batch["liq_ref"].to(dev)
 
             bf   = batch.get("baseline_feats", torch.empty(0)).to(dev) if isinstance(batch, dict) else None
-            out = model.forward_from_data(data, tgt, pidx, pbat, pw, baseline_feats=bf)
+            out = model.forward_from_data(data, tgt, pidx, pbat, pw, baseline_feats=bf, ctx_feats=batch["ctx_feats"].to(dev))
             # schedule the weights: emphasis on Huber early, then q50; delay q90
             wts = loss_weight_schedule(ep)
             # normalize labels and predictions only inside the loss

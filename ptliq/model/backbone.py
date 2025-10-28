@@ -123,16 +123,29 @@ class LiquidityResidualBackbone(nn.Module):
     Target/basket reasoning:
       - PMA summary of portfolio tokens (DV01-weighted values)
       - Target→portfolio cross-attention
-      - Fuse [target, context, fused] and predict via heads
+      - Fuse [target, context, fused, (optional ctx scalars proj)] and predict via heads
     """
-    def __init__(self, d_model: int = 128, n_heads: int = 4, dropout: float = 0.1, heads_module=None, baseline_dim: int = 0):
+    def __init__(self, d_model: int = 128, n_heads: int = 4, dropout: float = 0.1, heads_module=None, baseline_dim: int = 0, extra_ctx_dim: int = 0):
         super().__init__()
         self.pma   = PMAPooling(d_model, n_heads, dropout)
         self.cross = TargetPortfolioCrossAttention(d_model, n_heads, dropout)
-        self.fuse_ln = nn.LayerNorm(3*d_model)
-        self.fuse    = nn.Sequential(nn.Linear(3*d_model, d_model),
-                                     nn.ReLU(), nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
-                                     nn.Linear(d_model, d_model))
+        self.extra_ctx_dim = int(extra_ctx_dim)
+        # optional projection for context scalars
+        self.ctx_proj = nn.Identity()
+        if self.extra_ctx_dim > 0:
+            self.ctx_proj = nn.Sequential(
+                nn.LayerNorm(self.extra_ctx_dim),
+                nn.Linear(self.extra_ctx_dim, d_model),
+                nn.ReLU(inplace=True),
+            )
+        fuse_in = 3 * d_model + (d_model if self.extra_ctx_dim > 0 else 0)
+        self.fuse_ln = nn.LayerNorm(fuse_in)
+        self.fuse    = nn.Sequential(
+            nn.Linear(fuse_in, d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+            nn.Linear(d_model, d_model),
+        )
         # Optional per-trade baseline (size/side[/urgency]) → additive d_model correction
         self.baseline_proj = None
         if baseline_dim and baseline_dim > 0:
@@ -155,6 +168,7 @@ class LiquidityResidualBackbone(nn.Module):
         port_batch: torch.LongTensor,            # (T,) in [0..B-1]
         port_weight: torch.Tensor | None = None,  # (T,)
         baseline_feats: torch.Tensor | None = None,  # (B, K)
+        ctx_feats: torch.Tensor | None = None,       # (B, C)
     ) -> Dict[str, torch.Tensor]:
         B = int(target_index.numel())
         d = node_embeddings.size(-1)
@@ -193,7 +207,15 @@ class LiquidityResidualBackbone(nn.Module):
                 contexts[b] = torch.zeros(d, device=device)
                 fused[b]    = targets[b]
 
-        z = torch.cat([targets, contexts, fused], dim=-1)
+        pieces = [targets, contexts, fused]
+        # Maintain consistent fusion input width: if extra_ctx_dim>0 but ctx_feats missing, append zeros
+        if self.extra_ctx_dim > 0:
+            if (ctx_feats is not None) and (ctx_feats.numel() > 0):
+                proj = self.ctx_proj(ctx_feats)
+            else:
+                proj = torch.zeros(B, d, device=device)
+            pieces.append(proj)
+        z = torch.cat(pieces, dim=-1)
         z = self.fuse_ln(z)
         z = self.fuse(z)
         # Important: portfolio tower predicts pure deltas. Do NOT inject baseline features here.

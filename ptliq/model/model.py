@@ -491,12 +491,14 @@ class LiquidityModelGAT(nn.Module):
                  rel_emb_dim: int = 16,
                  rel_init_boost: dict | None = None,
                  encoder_type: str = "gat",
-                 baseline_dim: int = 0):
+                 baseline_dim: int = 0,
+                 ctx_dim: int = 3):
         super().__init__()
         self.encoder_type = str(encoder_type)
         self.is_mlp = (self.encoder_type.lower() == "mlp")
         self.d_model = d_model
         self.baseline_dim = int(baseline_dim)
+        self.ctx_dim = int(ctx_dim)
 
         if self.is_mlp:
             # Use a dedicated encoder for the MLP baseline over baseline_feats
@@ -510,7 +512,7 @@ class LiquidityModelGAT(nn.Module):
             )
             if self.encoder_type == "gat_diff":
                 self.corr_refiner = CorrDifferentialRefiner(d_model=d_model)
-            self.backbone = LiquidityResidualBackbone(d_model=d_model, n_heads=heads, dropout=dropout, baseline_dim=baseline_dim)
+            self.backbone = LiquidityResidualBackbone(d_model=d_model, n_heads=heads, dropout=dropout, baseline_dim=baseline_dim, extra_ctx_dim=self.ctx_dim)
 
     # convenience: tensors API
     def forward_from_tensors(self,
@@ -520,13 +522,14 @@ class LiquidityModelGAT(nn.Module):
                              port_index: torch.LongTensor, port_batch: torch.LongTensor,
                              port_weight: Optional[torch.Tensor] = None,
                              issuer_index: Optional[torch.Tensor] = None,
-                             baseline_feats: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                             baseline_feats: Optional[torch.Tensor] = None,
+                             ctx_feats: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         if self.is_mlp:
             B = int(target_index.numel()) if target_index is not None else (baseline_feats.shape[0] if baseline_feats is not None else 0)
             device = x.device if torch.is_tensor(x) else (baseline_feats.device if torch.is_tensor(baseline_feats) else None)
             return self.mlp(baseline_feats, batch_size=B, device=device)
         h = self.encoder(x, edge_index, edge_type, edge_weight=edge_weight, issuer_index=issuer_index)
-        return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight, baseline_feats=baseline_feats)
+        return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight, baseline_feats=baseline_feats, ctx_feats=ctx_feats)
 
     # convenience: PyG Data API
     def forward_from_data(self,
@@ -534,7 +537,8 @@ class LiquidityModelGAT(nn.Module):
                          target_index: torch.LongTensor,
                          port_index: torch.LongTensor, port_batch: torch.LongTensor,
                          port_weight: Optional[torch.Tensor] = None,
-                         baseline_feats: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                         baseline_feats: Optional[torch.Tensor] = None,
+                         ctx_feats: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         if self.is_mlp:
             B = int(target_index.numel()) if target_index is not None else (baseline_feats.shape[0] if baseline_feats is not None else 0)
             device = data.x.device if hasattr(data, 'x') else (baseline_feats.device if torch.is_tensor(baseline_feats) else None)
@@ -557,7 +561,7 @@ class LiquidityModelGAT(nn.Module):
                     ew_corr = data.edge_weight[mask] if hasattr(data, "edge_weight") and data.edge_weight is not None else torch.zeros(mask.sum().item(), device=h.device, dtype=h.dtype)
                     if ei_corr.numel() > 0:
                         h = self.corr_refiner(h, ei_corr, ew_corr)
-        return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight, baseline_feats=baseline_feats)
+        return self.backbone.forward_from_node_embeddings(h, target_index, port_index, port_batch, port_weight, baseline_feats=baseline_feats, ctx_feats=ctx_feats)
 
 # Alias for notebooks
 LiquidityModelColab = LiquidityModelGAT
