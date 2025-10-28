@@ -21,6 +21,8 @@ ptliq-pack = "ptliq.cli.pack:app"
 ptliq-serve = "ptliq.cli.serve:app"
 ptliq-score = "ptliq.cli.score:app"
 ptliq-run = "ptliq.cli.run:app"
+ptliq-dgt-build = "ptliq.cli.mvdgt_build:app"
+ptliq-dgt-train = "ptliq.cli.mvdgt_train:app"
 
 ptliq-exp = "ptliq.cli.exp_gnn_vs_baseline:app"
 
