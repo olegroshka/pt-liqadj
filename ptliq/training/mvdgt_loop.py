@@ -1,3 +1,4 @@
+# mvdgt_loop.py
 from __future__ import annotations
 
 import json
@@ -100,6 +101,22 @@ def _collate(batch):
     return {k: torch.as_tensor(v) for k, v in out.items()}
 
 
+def _metrics_bps(y_true: torch.Tensor, y_pred: torch.Tensor) -> dict[str, float]:
+    """
+    Compute MSE, RMSE, and MAE in basis points (bps) given true and predicted tensors.
+    y_true, y_pred: shapes (B,) or (B,1) assumed to be in bps.
+    Returns float metrics in a dict with keys: mse_bps, rmse_bps, mae_bps.
+    """
+    err = (y_pred.view(-1) - y_true.view(-1)).float()
+    mse = torch.mean(err * err)
+    mae = torch.mean(err.abs())
+    return {
+        "mse_bps": float(mse.item()),
+        "rmse_bps": float(torch.sqrt(mse + 1e-12).item()),
+        "mae_bps": float(mae.item()),
+    }
+
+
 def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     """
     Train the MV-DGT model using artifacts produced by the dataset builder.
@@ -151,6 +168,26 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
         use_market=(mkt_dim > 0),
         trade_dim=2,
     ).to(device)
+
+    # --- runtime sanity prints for correlation gate and edge counts
+    try:
+        corr_gate_val = float(torch.sigmoid(model.corr_gate).item())
+        print(f"corr_gate = {corr_gate_val:.6f}")
+    except Exception:
+        print("corr_gate = <unavailable>")
+    try:
+        n_corr_global = int(getattr(model, "mask_corr_global").sum().item()) if hasattr(model, "mask_corr_global") else None
+        n_corr_local = int(getattr(model, "mask_corr_local").sum().item()) if hasattr(model, "mask_corr_local") else None
+        if n_corr_global is not None:
+            print(f"num corr_global edges = {n_corr_global}")
+        else:
+            print("num corr_global edges = <mask missing>")
+        if n_corr_local is not None:
+            print(f"num corr_local  edges = {n_corr_local}")
+        else:
+            print("num corr_local  edges = <mask missing>")
+    except Exception:
+        print("<failed to compute corr edge counts>")
 
     # standardized residuals stats from train split
     y_tr = pd.read_parquet(workdir / "samples.parquet")
@@ -226,17 +263,19 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
                     opt.step()
                     sched.step()
                 bsz = int(y.size(0))
-                # accumulate true bps metrics
-                batch_mse = float((err.detach() ** 2).mean().item())
-                batch_mae = float(torch.abs(err.detach()).mean().item())
-                tot_mse_bps += batch_mse * bsz
-                tot_mae_bps += batch_mae * bsz
+                # compute and accumulate true bps metrics
+                m = _metrics_bps(y_true=y.detach(), y_pred=yhat.detach())
+                tot_mse_bps += m["mse_bps"] * bsz
+                tot_mae_bps += m["mae_bps"] * bsz
                 n += bsz
 
-                # per-batch logging
+                # per-batch logging (train only)
                 if train_flag:
                     if writer is not None:
                         writer.add_scalar("train/batch_loss", float(loss.item()), global_step)
+                        writer.add_scalar("train/mse_bps", m["mse_bps"], global_step)
+                        writer.add_scalar("train/rmse_bps", m["rmse_bps"], global_step)
+                        writer.add_scalar("train/mae_bps", m["mae_bps"], global_step)
                     if cfg.enable_tqdm and tqdm is not None:
                         it.set_postfix({"loss": f"{float(loss.item()):.4f}"})
                     global_step += 1
@@ -244,6 +283,7 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
         avg_rmse = avg_mse ** 0.5
         avg_mae = tot_mae_bps / max(1, n)
         if writer is not None:
+            writer.add_scalar(f"{phase}/mse_bps", float(avg_mse), epoch)
             writer.add_scalar(f"{phase}/rmse_bps", float(avg_rmse), epoch)
             writer.add_scalar(f"{phase}/mae_bps", float(avg_mae), epoch)
         return avg_mse, avg_mae
@@ -258,12 +298,17 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
         va_loss, va_mae = _run(va_loader, train_flag=False, epoch=ep, phase="val")
         if writer is not None:
             writer.add_scalar("lr", float(opt.param_groups[0].get("lr", cfg.lr)), ep)
+            # log corr gate value each epoch for monitoring
+            try:
+                writer.add_scalar("model/corr_gate", float(torch.sigmoid(model.corr_gate).item()), ep)
+            except Exception:
+                pass
         if va_loss < best:
             best = va_loss
             best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
         if cfg.enable_tqdm and tqdm is not None:
             ep_iter.set_postfix({"val_mse": f"{va_loss:.4f}", "train_mse": f"{tr_loss:.4f}"})
-        print(f"epoch {ep:03d} train_mse={tr_loss:.4f} val_mse={va_loss:.4f}")
+        print(f"epoch {ep:03d} train_mae={tr_mae:.4f} train_rmse={(tr_loss ** 0.5):.4f} val_mae={va_mae:.4f} val_rmse={(va_loss ** 0.5):.4f}")
         history.append({"epoch": ep, "train_mse": float(tr_loss), "train_mae": float(tr_mae), "val_mse": float(va_loss), "val_mae": float(va_mae)})
     if best_state is not None:
         model.load_state_dict(best_state)
