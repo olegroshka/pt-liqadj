@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 import torch
 from torch import nn, Tensor
+from ptliq.utils.attn_utils import extract_heads_mean_std, attn_store_update
 try:
     from torch_geometric.nn import TransformerConv
 except Exception as e:  # pragma: no cover - optional dependency guard for import-time
@@ -191,6 +192,10 @@ class MultiViewDGT(nn.Module):
         for name, mask in (view_masks or {}).items():
             self.register_buffer(f"mask_{name}", mask.bool(), persistent=False)
 
+        # attention capture toggles/state (for TensorBoard stats)
+        self._capture_attn: bool = False
+        self._attn_stats: dict = {}
+
     def _run_layer(self, x: torch.Tensor, layer: int) -> torch.Tensor:
         # structural baseline
         ei_s = self.edge_index_all[:, getattr(self, "mask_struct")]
@@ -200,7 +205,29 @@ class MultiViewDGT(nn.Module):
         glog  = self.g1_logit if layer == 1 else self.g2_logit
         g     = {k: torch.sigmoid(v) for k, v in glog.items()}
 
-        h_s = convs["struct"](x, ei_s, edge_attr=ew_s)
+        # helper to maybe record attention statistics
+        def _maybe_record(view: str, out):
+            if not getattr(self, "_capture_attn", False):
+                return out
+            # When return_attention_weights=True, conv returns (h, (ei, alpha))
+            if isinstance(out, tuple) and len(out) == 2 and isinstance(out[1], tuple):
+                h, att = out
+                _ei_att, alpha = att
+                mean, std = extract_heads_mean_std(alpha)
+                layer_key = f"l{layer}"
+                # store under self._attn_stats
+                if not hasattr(self, "_attn_stats") or self._attn_stats is None:
+                    self._attn_stats = {}
+                attn_store_update(self._attn_stats, layer_key, view, mean, std)
+                return h
+            return out
+
+        # run structural conv
+        if getattr(self, "_capture_attn", False):
+            out_s = convs["struct"](x, ei_s, edge_attr=ew_s, return_attention_weights=True)
+            h_s = _maybe_record("struct", out_s)
+        else:
+            h_s = convs["struct"](x, ei_s, edge_attr=ew_s)
 
         def _msg(view: str):
             mask = getattr(self, f"mask_{view}")
@@ -215,6 +242,9 @@ class MultiViewDGT(nn.Module):
             if view in ("corr_global", "corr_local"):
                 gate = torch.sigmoid(self.corr_gate)  # scalar in (0,1)
                 ew = ew * gate
+            if self._capture_attn:
+                out = convs[view](x, ei, edge_attr=ew, return_attention_weights=True)
+                return _maybe_record(view, out)
             return convs[view](x, ei, edge_attr=ew)
 
         h_port = _msg("port")

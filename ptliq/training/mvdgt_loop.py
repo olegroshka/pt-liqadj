@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 import pandas as pd
 import torch
+import logging
 
 # Optional progress bar
 try:  # pragma: no cover - tqdm is optional
@@ -22,6 +23,8 @@ except Exception:  # pragma: no cover - tensorboard is optional
     SummaryWriter = None  # type: ignore
 
 from ptliq.model.mv_dgt import MultiViewDGT
+from ptliq.utils.attn_utils import enable_model_attn_capture, disable_model_attn_capture, log_attn_tb
+from ptliq.utils.logging_utils import get_logger, setup_tb, safe_close_tb
 
 
 @dataclass
@@ -41,6 +44,9 @@ class MVDGTTrainConfig:
     tb_log_dir: Optional[str] = None  # default to <workdir>/tb when None
     enable_tqdm: bool = True
     log_every: int = 50  # batch logging interval
+    # attention TB logging
+    enable_attn_tb: bool = False
+    attn_log_every: int = 200  # batches
 
 
 def _set_seed(seed: int) -> None:
@@ -129,8 +135,29 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     workdir = Path(cfg.workdir)
     pyg_dir = Path(cfg.pyg_dir)
 
+    # --- logging setup via util
+    logger = get_logger("ptliq.training.mvdgt", workdir, filename="train_mvdgt.log")
+
     # --- load meta & artifacts
     meta = json.loads((workdir / "mvdgt_meta.json").read_text())
+
+    # --- log training config early
+    try:
+        cfg_dict = asdict(cfg)
+        # cast Paths to str for readability/JSON
+        for k, v in list(cfg_dict.items()):
+            if isinstance(v, Path):
+                cfg_dict[k] = str(v)
+        logger.info("training_config=" + json.dumps(cfg_dict, ensure_ascii=False))
+        # persist a copy under out/
+        try:
+            out_dir = workdir / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "train_config.json").write_text(json.dumps(cfg_dict, indent=2))
+        except Exception:
+            pass
+    except Exception:
+        logger.warning("failed to log training config")
     data = torch.load(meta["files"]["pyg_graph"], map_location="cpu", weights_only=False)
     view_masks = torch.load(workdir / "view_masks.pt", map_location="cpu", weights_only=False)
 
@@ -142,6 +169,44 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
         view_masks[k] = view_masks[k].to(device)
 
     mkt_ctx, port_ctx = _load_context(meta.get("files", {}), device)
+
+    # --- log context availability & stats
+    try:
+        if mkt_ctx is not None and isinstance(mkt_ctx, dict) and ("mkt_feat" in mkt_ctx):
+            mf = mkt_ctx["mkt_feat"]
+            logger.info(f"market_context: available | mkt_feat shape={tuple(mf.shape)} dtype={mf.dtype} device={mf.device}")
+            try:
+                mv = float(mf.float().mean().item())
+                sd = float(mf.float().std(unbiased=False).item())
+                logger.info(f"market_context: mean={mv:.6f} std={sd:.6f}")
+            except Exception:
+                pass
+        else:
+            logger.info("market_context: not available")
+    except Exception:
+        logger.warning("failed to log market context stats")
+
+    try:
+        if port_ctx is not None and isinstance(port_ctx, dict):
+            required = {"port_nodes_flat","port_w_signed_flat","port_len"}
+            missing = required.difference(set(port_ctx.keys()))
+            if missing:
+                logger.info(f"portfolio_context: available but missing keys={sorted(missing)}")
+            nodes_flat = port_ctx.get("port_nodes_flat")
+            lens = port_ctx.get("port_len")
+            if nodes_flat is not None and lens is not None:
+                L = int(nodes_flat.numel())
+                G = int(lens.numel())
+                avg = float(lens.float().mean().item()) if G > 0 else 0.0
+                mn = int(lens.min().item()) if G > 0 else 0
+                mx = int(lens.max().item()) if G > 0 else 0
+                logger.info(f"portfolio_context: available | groups={G} line_items={L} avg_len={avg:.2f} min_len={mn} max_len={mx}")
+            else:
+                logger.info("portfolio_context: available | stats unavailable (missing tensors)")
+        else:
+            logger.info("portfolio_context: not available")
+    except Exception:
+        logger.warning("failed to log portfolio context stats")
 
     # datasets
     samp = pd.read_parquet(workdir / "samples.parquet")
@@ -172,22 +237,24 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     # --- runtime sanity prints for correlation gate and edge counts
     try:
         corr_gate_val = float(torch.sigmoid(model.corr_gate).item())
-        print(f"corr_gate = {corr_gate_val:.6f}")
+        logger.info(f"corr_gate = {corr_gate_val:.6f}")
     except Exception:
-        print("corr_gate = <unavailable>")
+        logger.warning("corr_gate = <unavailable>")
     try:
-        n_corr_global = int(getattr(model, "mask_corr_global").sum().item()) if hasattr(model, "mask_corr_global") else None
-        n_corr_local = int(getattr(model, "mask_corr_local").sum().item()) if hasattr(model, "mask_corr_local") else None
-        if n_corr_global is not None:
-            print(f"num corr_global edges = {n_corr_global}")
-        else:
-            print("num corr_global edges = <mask missing>")
-        if n_corr_local is not None:
-            print(f"num corr_local  edges = {n_corr_local}")
-        else:
-            print("num corr_local  edges = <mask missing>")
+        def _mask_count(name: str):
+            if hasattr(model, f"mask_{name}"):
+                return int(getattr(model, f"mask_{name}").sum().item())
+            return None
+        n_struct = _mask_count("struct")
+        n_port = _mask_count("port")
+        n_corr_global = _mask_count("corr_global")
+        n_corr_local = _mask_count("corr_local")
+        logger.info(f"num struct      edges = {n_struct if n_struct is not None else '<mask missing>'}")
+        logger.info(f"num port        edges = {n_port if n_port is not None else '<mask missing>'}")
+        logger.info(f"num corr_global edges = {n_corr_global if n_corr_global is not None else '<mask missing>'}")
+        logger.info(f"num corr_local  edges = {n_corr_local if n_corr_local is not None else '<mask missing>'}")
     except Exception:
-        print("<failed to compute corr edge counts>")
+        logger.warning("<failed to compute edge counts>")
 
     # standardized residuals stats from train split
     y_tr = pd.read_parquet(workdir / "samples.parquet")
@@ -207,14 +274,7 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     loss_fn = torch.nn.SmoothL1Loss(reduction="none")
 
     # TensorBoard writer (optional)
-    writer = None
-    if cfg.enable_tb and SummaryWriter is not None:
-        tb_dir = Path(cfg.tb_log_dir) if cfg.tb_log_dir else (workdir / "tb")
-        try:
-            tb_dir.mkdir(parents=True, exist_ok=True)
-            writer = SummaryWriter(log_dir=str(tb_dir))
-        except Exception:
-            writer = None  # fallback silently
+    writer = setup_tb(enable_tb=cfg.enable_tb, workdir=workdir, tb_log_dir=cfg.tb_log_dir)
 
     # progress bar util
     def _tqdm(iterable, total=None, **kwargs):
@@ -246,7 +306,20 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
                     batch["log_size"].float().to(device),
                 ], dim=1)
 
+                # optionally capture attention stats this step
+                capture_attn = bool(
+                    train_flag and (writer is not None) and cfg.enable_attn_tb and (
+                        global_step % max(1, int(cfg.attn_log_every)) == 0
+                    )
+                )
+                if capture_attn:
+                    enable_model_attn_capture(model)
                 yhat = model(x, anchor_idx=anchor, market_feat=mkt, pf_gid=pf_gid, port_ctx=port_ctx, trade_feat=trade)
+                # if captured, push attention summaries to TB
+                if capture_attn:
+                    stats = getattr(model, "_attn_stats", {}) or {}
+                    log_attn_tb(writer, stats, global_step, prefix="attn/")
+                    disable_model_attn_capture(model)
 
                 # standardized error; robust loss with portfolio weighting
                 err = yhat - y
@@ -308,23 +381,19 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
             best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
         if cfg.enable_tqdm and tqdm is not None:
             ep_iter.set_postfix({"val_mse": f"{va_loss:.4f}", "train_mse": f"{tr_loss:.4f}"})
-        print(f"epoch {ep:03d} train_mae={tr_mae:.4f} train_rmse={(tr_loss ** 0.5):.4f} val_mae={va_mae:.4f} val_rmse={(va_loss ** 0.5):.4f}")
+        logger.info(f"epoch {ep:03d} train_mae={tr_mae:.4f} train_rmse={(tr_loss ** 0.5):.4f} val_mae={va_mae:.4f} val_rmse={(va_loss ** 0.5):.4f}")
         history.append({"epoch": ep, "train_mse": float(tr_loss), "train_mae": float(tr_mae), "val_mse": float(va_loss), "val_mae": float(va_mae)})
     if best_state is not None:
         model.load_state_dict(best_state)
     te_loss, te_mae = _run(te_loader, train_flag=False, epoch=num_epochs + 1, phase="test")
-    print(f"[TEST] MSE = {te_loss:.4f}")
+    te_rmse = float(te_loss ** 0.5)
+    logger.info(f"[TEST] RMSE = {te_rmse:.4f} | MAE = {te_mae:.4f} | MSE = {te_loss:.4f}")
 
     # save
     ckpt_path = workdir / "mv_dgt_ckpt.pt"
     torch.save({"state_dict": model.state_dict(), "meta": meta}, ckpt_path)
-    print(f"[OK] wrote {ckpt_path}")
+    logger.info(f"[OK] wrote {ckpt_path}")
 
-    if writer is not None:
-        try:
-            writer.flush()
-            writer.close()
-        except Exception:
-            pass
+    safe_close_tb(writer)
 
-    return {"val_mse": float(best), "test_mse": float(te_loss), "history": history}
+    return {"val_mse": float(best), "test_mse": float(te_loss), "test_rmse": te_rmse, "test_mae": float(te_mae), "history": history}
