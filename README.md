@@ -233,3 +233,180 @@ python -m pytest -q
 
 MIT (see `LICENSE`).
 
+
+---
+
+## Developer setup and installation
+
+- Python 3.10+ recommended.
+- Install in editable mode:
+
+```
+pip install -e .[dev]
+```
+
+Notes:
+- For GPU training, install PyTorch with CUDA first (see https://pytorch.org/get-started/locally/), then run the command above.
+- Torch Geometric wheels are pulled automatically via `pip` for many CUDA/torch combos; if you hit platform issues, consult https://pytorch-geometric.readthedocs.io/ for the exact install command for your environment.
+
+### Useful Makefile targets (optional)
+If you prefer `make` helpers (when available in your environment):
+
+```
+make lint   # ruff, mypy
+make test   # pytest -q
+```
+
+---
+
+## CLI commands (from pyproject.toml)
+The project exposes several CLI entry points after installation. Highlights:
+
+- Data lifecycle:
+  - `ptliq-simulate` — simulate raw data (`data/raw/sim`).
+  - `ptliq-validate` — validate schema/consistency of raw tables.
+  - `ptliq-split` — create chronological train/val/test ranges.
+  - `ptliq-featurize` — feature pipelines:
+    - `ptliq-featurize graph` — build graph artifacts (nodes/edges, portfolio weights, market features).
+    - `ptliq-featurize pyg` — convert to PyG tensors and feature meta.
+  - `ptliq-explore` — quick statistics/plots for parquet files.
+  - `ptliq-pyg-explore` — inspect PyG features run directory.
+
+- Training:
+  - `ptliq-gat-train` — train the GATv2-based portfolio model on PyG features.
+  - `ptliq-dgt-build` — prepare MV-DGT samples/masks from trades + graph + PyG.
+  - `ptliq-dgt-train` — train MV-DGT from the prepared workdir.
+
+- Orchestration / misc:
+  - `ptliq-run`, `ptliq-exp` — end-to-end or experiment runners.
+  - `ptliq-start-tensorboard`, `ptliq-stop-tensorbord` — helper commands to manage TensorBoard.
+
+Full list lives in `pyproject.toml` under `[project.scripts]`.
+
+---
+
+## Project goal (brief)
+Portfolio-aware liquidity adjustment: predict per-bond price impact/residual not only from the bond’s own features but also from portfolio composition and market context. We compare portfolio-agnostic baselines to portfolio-aware GNN/attention models and provide reproducible pipelines end-to-end.
+
+---
+
+## Practical pipelines with example commands
+Below are reproducible, copy-pastable snippets to get you from raw data to trained models. Paths assume running from the project root and write artifacts under `data/` and `models/`.
+
+### 1) Simulate and validate raw data
+
+```
+# Generate a small synthetic dataset
+ptliq-simulate --outdir data/raw/sim
+
+# Validate schema/consistency
+ptliq-validate --rawdir data/raw/sim
+```
+
+Optional: explore the generated tables.
+
+```
+ptliq-explore data/raw/sim/bonds.parquet --correlations --plots --pdf
+ptliq-explore data/raw/sim/trades.parquet --correlations --plots --pdf
+```
+
+### 2) Build graph + PyG features
+
+```
+# Graph construction (relations + portfolio weights + market features)
+ptliq-featurize graph \
+  --bonds data/raw/sim/bonds.parquet \
+  --trades data/raw/sim/trades.parquet \
+  --outdir data/graph \
+  --cotrade-q 0.85 \
+  --cotrade-topk 20
+
+# Convert to PyG tensors
+ptliq-featurize pyg \
+  --graph-dir data/graph \
+  --outdir data/pyg
+```
+
+You can inspect PyG features with:
+
+```
+ptliq-pyg-explore --features-run-dir data/pyg --pdf
+```
+
+### 3) Train the GAT model (GNN + attention)
+
+Minimal run on simulated data (CUDA if available):
+
+```
+ptliq-gat-train \
+  --features-run-dir data/features/sim1000 \
+  --trades data/raw/sim/trades.parquet \
+  --graph-dir data/graph \
+  --outdir models/liquidity/exp_sim1001_gatv2 \
+  --config configs/gat.default.yaml \
+  --seed 7 \
+  --tb \
+  --tb-log-dir models/exp_sim1001_gatv2/tb \
+  --device cuda
+```
+
+Notes:
+- `--features-run-dir` should point to a PyG features run (e.g., `data/pyg`). If you use a different folder structure (e.g., `data/features/some_run`), point there accordingly.
+- Override hyper-parameters via CLI or `configs/gat.default.yaml`.
+
+### 4) Build and train MV-DGT
+
+Prepare the MV-DGT working directory (samples + masks):
+
+```
+ptliq-dgt-build \
+  --trades-path data/raw/sim/trades.parquet \
+  --graph-dir data/graph \
+  --pyg-dir data/pyg \
+  --outdir data/mvdgt/exp001
+```
+
+Train MV-DGT:
+
+```
+ptliq-dgt-train \
+  --workdir data/mvdgt/exp001 \
+  --pyg-dir data/pyg \
+  --epochs 20 \
+  --lr 1e-3 \
+  --batch-size 1024 \
+  --outdir models/dgt_8
+```
+
+---
+
+## TensorBoard: start/stop and where to look
+
+Most training commands can log to TensorBoard. Typical locations are under each model’s `tb/` subdirectory (e.g., `models/exp_sim1001_gatv2/tb`, `models/mvdgt/tb`).
+
+Start TensorBoard with our helper:
+
+```
+ptliq-start-tensorboard --logdir models --port 6006
+```
+
+Stop it later (helper name spelling as in `pyproject.toml`):
+
+```
+ptliq-stop-tensorbord --port 6006
+```
+
+Or use the native command directly:
+
+```
+tensorboard --logdir models --port 6006
+```
+
+Open http://localhost:6006 in your browser.
+
+---
+
+## Troubleshooting tips
+- If `torch-geometric` complains about incompatible wheels, reinstall it matching your Torch/CUDA versions (see official docs), then reinstall this project with `pip install -e .`.
+- On CPU-only hosts, pass `--device cpu` to training CLIs or set `device: "cpu"` in configs.
+- Use `ptliq-explore` and `ptliq-pyg-explore` to sanity-check inputs before training.
