@@ -1,0 +1,53 @@
+# Default config to run MV-DGT end-to-end with `ptliq-run`
+# Usage:
+#   ptliq-run --config configs/mvdgt_default.yaml --workdir .
+# This will:
+#   - (optionally) simulate tiny raw data
+#   - validate raw
+#   - build graph + PyG artifacts
+#   - build MV-DGT dataset (samples + view masks)
+#   - train MV-DGT model and write metrics
+
+project:
+  name: pt-liqadj
+  seed: 42
+  run_id: dgt_default
+
+paths:
+  raw_dir: data/raw/sim           # where bonds.parquet, trades.parquet will live
+  interim_dir: data/interim       # validation reports etc.
+  features_dir: data/features     # baseline features (unused here)
+  models_dir: models              # baseline models root (unused here)
+  reports_dir: reports            # baseline reports (unused here)
+
+# Place the MV-DGT runner settings under data.mvdgt
+# (keeps backward-compat with RootConfig)
+data:
+  mvdgt:
+    # If present, will (re)simulate a tiny dataset; remove this block to use your own raw parquet files.
+    sim:
+      n_bonds: 200
+      n_days: 10
+      providers: [P1, P2]
+      seed: 42
+
+    # Locations (resolved relative to --workdir)
+    graph_dir: data/graph
+    pyg_dir: data/pyg
+    outdir: data/mvdgt/dgt_default      # where dataset artifacts (samples, masks, meta) go
+    models_dir: models/mvdgt            # where trained MV-DGT model + metrics go
+
+    # Dataset split ratios
+    split_train: 0.70
+    split_val: 0.15
+
+    # Optional: path to trades parquet (default: uses simulated trades under paths.raw_dir)
+    # trades_path: data/raw/sim/trades.parquet
+
+    # Training hyperparameters
+    epochs: 5
+    lr: 0.001
+    weight_decay: 0.0001
+    batch_size: 512
+    seed: 17
+    device: auto  # "cuda" or "cpu"; "auto" picks cuda if available
