@@ -406,6 +406,88 @@ Open http://localhost:6006 in your browser.
 
 ---
 
+## Serving the API and the demo website
+
+The project ships with two CLIs that let you serve the scoring API and a tiny demo website.
+Defaults are chosen so you can run both with zero arguments.
+
+### Start the FastAPI scoring service
+
+```
+ptliq-serve
+```
+
+Defaults:
+- package: `serving/tmp_model` (a tiny local model for smoke testing)
+- host: `127.0.0.1`
+- port: `8011`
+- device: `cpu`
+
+Override as needed, e.g. to point at a packaged model zip:
+
+```
+ptliq-serve --package serving/packages/my_run.zip --host 0.0.0.0 --port 8011
+```
+
+Stop the server (reads the pidfile and terminates the process):
+
+```
+ptliq-serve stop
+# or explicitly (useful if you changed the port):
+ptliq-serve stop --port 8011
+```
+
+Tips:
+- If you get a message about an existing pidfile, either stop the old process or start with `--force`:
+  - `ptliq-serve --force`
+
+### Start the demo website (Gradio UI)
+
+The website accepts a JSON payload like:
+
+```
+{"rows":[{"isin":"US1","f_a":1.2,"f_b":-0.7},{"isin":"US2","f_a":0.0,"f_b":3.3}]}
+```
+
+and displays a grid with columns `Portfolio Id | Isin | Liquidity score adjustment`, including multi-select filters.
+
+Start the site (defaults to the local API server):
+
+```
+ptliq-web
+```
+
+Defaults:
+- api-url: `http://127.0.0.1:8011`
+- host: `127.0.0.1`
+- port: `7861`
+- open browser: yes (disable with `--no-open-browser`)
+
+Examples:
+
+```
+# Disable auto-opening a browser
+ptliq-web --no-open-browser
+
+# Start on a different port and point to a remote API
+ptliq-web --api-url http://my-api-host:8011 --port 9000
+```
+
+Stop the website:
+
+```
+ptliq-web stop
+# or explicitly by port
+ptliq-web stop --port 7861
+```
+
+If you ever encounter a page stuck on "Loading…":
+- Stop the web process (`ptliq-web stop`) and start again.
+- Open the site in an Incognito/Private window to avoid stale service-worker cache.
+- Ensure the API (`ptliq-serve`) is running and healthy at the configured `--api-url` (`/health` returns JSON).
+
+---
+
 ## Troubleshooting tips
 - If `torch-geometric` complains about incompatible wheels, reinstall it matching your Torch/CUDA versions (see official docs), then reinstall this project with `pip install -e .`.
 - On CPU-only hosts, pass `--device cpu` to training CLIs or set `device: "cpu"` in configs.

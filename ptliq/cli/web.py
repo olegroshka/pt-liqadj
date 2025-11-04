@@ -1,26 +1,25 @@
 from __future__ import annotations
-from pathlib import Path
 import os
 import signal
+from pathlib import Path
 import atexit
 import typer
-import uvicorn
 from rich import print
-from ptliq.service.scoring import Scorer
-from ptliq.service.app import create_app
+from ptliq.web.site import build_ui
 
-PID_ENV = "PTLIQ_SERVE_PIDFILE"
+PID_ENV = "PTLIQ_WEB_PIDFILE"
 
 app = typer.Typer(no_args_is_help=False)
 
 
 def _pidfile_path(port: int) -> Path:
+    # Allow tests or power users to override via env var
     override = os.environ.get(PID_ENV)
     if override:
         return Path(override)
     home = Path.home() / ".ptliq"
     home.mkdir(parents=True, exist_ok=True)
-    return home / f"ptliq-serve-{port}.pid"
+    return home / f"ptliq-web-{port}.pid"
 
 
 def _process_alive(pid: int) -> bool:
@@ -30,29 +29,28 @@ def _process_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
+        # Process exists but different user/session; treat as alive
         return True
 
 
 @app.callback(invoke_without_command=True)
 def app_main(
     ctx: typer.Context,
-    package: Path = typer.Option(Path("serving/tmp_model"), help="Path to models/<run_id> or serving/packages/<run_id>.zip"),
-    host: str = typer.Option("127.0.0.1"),
-    port: int = typer.Option(8011),
-    device: str = typer.Option("cpu"),
-    force: bool = typer.Option(False, help="Start even if an existing pidfile is present"),
+    api_url: str = typer.Option("http://127.0.0.1:8011", help="Base URL of the FastAPI scoring service"),
+    host: str = typer.Option("127.0.0.1", help="Host/interface to bind the UI"),
+    port: int = typer.Option(7861, help="Port for the UI server"),
+    open_browser: bool = typer.Option(True, help="Open the UI in browser (use --no-open-browser to disable)"),
+    share: bool = typer.Option(False, help="Create a public share URL (requires external network)"),
+    force: bool = typer.Option(False, help="Start even if an existing pidfile is present (may replace a stale one)"),
 ):
     """
-    Serve the model with FastAPI. Accepts either a model directory or a packaged zip.
-    Creates a pidfile so it can be stopped via `ptliq-serve stop`.
-    If a subcommand is invoked (e.g., `stop`), this callback will not start the server.
+    Launch a minimal website (Gradio) for submitting JSON payloads to the scoring API
+    and viewing the results in a filterable grid.
+    If a subcommand is invoked (e.g., `stop`), this callback will not launch the UI.
     """
-    # If a subcommand (like stop) is being called, do nothing here
+    # If subcommand is being invoked, skip starting the server
     if ctx.invoked_subcommand is not None:
         return
-
-    if package is None:
-        raise typer.BadParameter("--package is required when starting the server")
 
     pidfile = _pidfile_path(port)
     if pidfile.exists() and not force:
@@ -61,7 +59,7 @@ def app_main(
         except Exception:
             pid = None
         if pid and _process_alive(pid):
-            print(f"[yellow]ptliq-serve already running[/yellow] (pid={pid}, pidfile={pidfile}). Use --force to overwrite or run 'ptliq-serve stop --port {port}'.")
+            print(f"[yellow]ptliq-web already running[/yellow] (pid={pid}, pidfile={pidfile}). Use --force to overwrite or run 'ptliq-web stop --port {port}'.")
             raise typer.Exit(code=1)
         else:
             print(f"[yellow]Removing stale pidfile[/yellow]: {pidfile}")
@@ -70,9 +68,11 @@ def app_main(
             except Exception:
                 pass
 
+    # Write pidfile for stop command
     try:
         pidfile.write_text(str(os.getpid()))
     except Exception:
+        # Non-fatal: proceed without pidfile
         pass
 
     def _cleanup():
@@ -84,21 +84,31 @@ def app_main(
 
     atexit.register(_cleanup)
 
-    package = Path(package)
-    if package.is_dir():
-        scorer = Scorer.from_dir(package, device=device)
-    else:
-        scorer = Scorer.from_zip(package, device=device)
-    api = create_app(scorer)
-    uvicorn.run(api, host=host, port=port, log_level="info")
+    # Harden Gradio 4.15.0 against environments without external network
+    # Use local assets and disable analytics to avoid long waits/spinners.
+    os.environ.setdefault("GRADIO_USE_CDN", "false")
+    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "false")
+
+    ui = build_ui(api_url)
+    # Avoid any external calls or analytics that may hang in restricted networks.
+    ui.launch(
+        server_name=host,
+        server_port=port,
+        inbrowser=open_browser,
+        share=share,
+        show_api=False,
+        prevent_thread_lock=False,
+    )
 
 
 @app.command("stop")
 def stop_main(
-    port: int = typer.Option(8011, help="Port of the serve process whose pidfile should be used"),
+    port: int = typer.Option(7861, help="Port of the UI server whose pidfile should be used"),
     timeout: float = typer.Option(5.0, help="Seconds to wait for graceful shutdown"),
 ):
-    """Stop a running ptliq-serve process by reading its pidfile and sending SIGTERM."""
+    """
+    Stop a running ptliq-web process by reading its pidfile and sending SIGTERM.
+    """
     pidfile = _pidfile_path(port)
     if not pidfile.exists():
         print(f"[yellow]No pidfile found[/yellow] at {pidfile}. Nothing to stop.")
@@ -124,6 +134,7 @@ def stop_main(
     except ProcessLookupError:
         print(f"[yellow]Process {pid} already exited[/yellow].")
 
+    # Wait for termination
     import time
     start = time.time()
     while time.time() - start < timeout:
@@ -143,7 +154,8 @@ def stop_main(
     except Exception:
         pass
 
-    print(f"[green]Stopped[/green] ptliq-serve (pid={pid}).")
+    print(f"[green]Stopped[/green] ptliq-web (pid={pid}).")
+
 
 app = app
 

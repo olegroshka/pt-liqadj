@@ -17,6 +17,12 @@ def create_app(scorer: Scorer) -> FastAPI:
         y = scorer.score_many(req.rows)
         # extra guard before JSON serialization
         y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
-        return ScoreResponse(preds_bps=[float(v) for v in y])
+        preds = []
+        for row, v in zip(req.rows, y):
+            isin = row.get("isin")
+            # ensure a string key and handle missing isin gracefully
+            key = str(isin) if isin is not None else f"row_{len(preds)}"
+            preds.append({key: float(v)})
+        return ScoreResponse(preds_bps=preds)
 
     return app

@@ -5,7 +5,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pt-liqadj"
 version = "0.1.0"
-dependencies = ["pydantic", "pyarrow", "pandas", "numpy", "pyyaml", "typer", "rich", "torch", "torch-geometric", "fastapi", "uvicorn", "tensorboard"]
+dependencies = [
+    "pydantic",
+    "pyarrow",
+    "pandas",
+    "numpy",
+    "pyyaml",
+    "typer",
+    "rich",
+    "torch",
+    "torch-geometric",
+    "fastapi",
+    "uvicorn",
+    "tensorboard",
+    "requests",
+    "gradio>=4.44.1,<5",
+]
 
 [project.scripts]
 ptliq-simulate = "ptliq.cli.simulate:app"
@@ -21,6 +36,7 @@ ptliq-pack = "ptliq.cli.pack:app"
 ptliq-serve = "ptliq.cli.serve:app"
 ptliq-score = "ptliq.cli.score:app"
 ptliq-run = "ptliq.cli.run:app"
+ptliq-web = "ptliq.cli.web:app"
 ptliq-dgt-build = "ptliq.cli.mvdgt_build:app"
 ptliq-dgt-train = "ptliq.cli.mvdgt_train:app"
 
@@ -62,7 +78,3 @@ market = ["yfinance", "pandas_datareader", "fredapi"]
 # ptliq = ["**/*.yaml", "**/*.yml", "**/*.json", "**/*.txt"]
 
 
-[tool.pytest.ini_options]
-filterwarnings = [
-    "ignore:.*torch_geometric\\.distributed has been deprecated since 2\\.7\\.0.*:DeprecationWarning:torch_geometric\\.llm\\.utils\\.backend_utils",
-]

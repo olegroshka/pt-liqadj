@@ -45,9 +45,14 @@ def test_service_health_and_score(tmp_path: Path):
     assert r.status_code == 200
     assert r.json()["ok"] is True
 
-    # score: use first 3 rows from test split
-    rows = feats["test"][feat_cols].head(3).to_dict(orient="records")
+    # score: use first 3 rows from test split, include isin to preserve mapping
+    test_df = feats["test"][["isin"] + feat_cols].head(3)
+    rows = test_df.to_dict(orient="records")
     r = client.post("/score", json={"rows": rows})
     assert r.status_code == 200
     js = r.json()
     assert "preds_bps" in js and len(js["preds_bps"]) == len(rows)
+    # ensure each item is a dict with the corresponding isin key in the same order
+    isins = test_df["isin"].astype(str).tolist()
+    got_keys = [list(d.keys())[0] for d in js["preds_bps"]]
+    assert got_keys == isins
