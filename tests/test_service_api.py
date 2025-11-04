@@ -52,7 +52,9 @@ def test_service_health_and_score(tmp_path: Path):
     assert r.status_code == 200
     js = r.json()
     assert "preds_bps" in js and len(js["preds_bps"]) == len(rows)
-    # ensure each item is a dict with the corresponding isin key in the same order
+    # ensure each item has fields and the corresponding isin in the same order
     isins = test_df["isin"].astype(str).tolist()
-    got_keys = [list(d.keys())[0] for d in js["preds_bps"]]
-    assert got_keys == isins
+    got_isins = [d.get("isin") for d in js["preds_bps"]]
+    assert got_isins == isins
+    # pred_bps is a float number
+    assert all(isinstance(d.get("pred_bps"), (int, float)) for d in js["preds_bps"]) 

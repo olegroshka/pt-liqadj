@@ -26,7 +26,7 @@ def test_score_sanitizes_and_preserves_order():
     assert r.status_code == 200
     js = r.json()
     preds = js["preds_bps"]
-    keys = [list(d.keys())[0] for d in preds]
-    vals = [list(d.values())[0] for d in preds]
-    assert keys == [row["isin"] for row in rows]
+    isins = [d.get("isin") for d in preds]
+    vals = [d.get("pred_bps") for d in preds]
+    assert isins == [row["isin"] for row in rows]
     assert vals == [0.0, 0.0, 0.0, 1.5]

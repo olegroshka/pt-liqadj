@@ -20,9 +20,13 @@ def create_app(scorer: Scorer) -> FastAPI:
         preds = []
         for row, v in zip(req.rows, y):
             isin = row.get("isin")
-            # ensure a string key and handle missing isin gracefully
-            key = str(isin) if isin is not None else f"row_{len(preds)}"
-            preds.append({key: float(v)})
+            portfolio_id = row.get("portfolio_id")
+            item = {
+                "portfolio_id": None if portfolio_id is None else str(portfolio_id),
+                "isin": None if isin is None else str(isin),
+                "pred_bps": float(v),
+            }
+            preds.append(item)
         return ScoreResponse(preds_bps=preds)
 
     return app
