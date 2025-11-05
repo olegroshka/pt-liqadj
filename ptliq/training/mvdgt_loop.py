@@ -154,6 +154,8 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
             out_dir = workdir / "out"
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / "train_config.json").write_text(json.dumps(cfg_dict, indent=2))
+            # also mirror at workdir root so pack CLI can find it
+            (workdir / "train_config.json").write_text(json.dumps(cfg_dict, indent=2))
         except Exception:
             pass
     except Exception:
@@ -217,6 +219,28 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     tr_loader = torch.utils.data.DataLoader(tr, batch_size=int(cfg.batch_size), shuffle=True, collate_fn=_collate)
     va_loader = torch.utils.data.DataLoader(va, batch_size=int(cfg.batch_size), shuffle=False, collate_fn=_collate)
     te_loader = torch.utils.data.DataLoader(te, batch_size=int(cfg.batch_size), shuffle=False, collate_fn=_collate)
+
+    # --- Persist pack() compatibility artifacts: feature_names.json and scaler.json ---
+    # For MV-DGT, the only per-trade numeric inputs the loop directly uses are
+    # the trade features [side_sign, log_size]. We expose these as feature_names
+    # and compute simple mean/std from the TRAIN split to populate scaler.json.
+    try:
+        feature_names = ["side_sign", "log_size"]
+        tr_df = tr.df if hasattr(tr, "df") else None  # type: ignore[attr-defined]
+        if tr_df is not None and all(c in tr_df.columns for c in feature_names):
+            mean = [float(tr_df[c].astype(float).mean()) for c in feature_names]
+            std = [float(tr_df[c].astype(float).std(ddof=0)) for c in feature_names]
+            # guard against zeros/NaNs
+            std = [1.0 if (not (s > 0.0)) or (s != s) else float(s) for s in std]
+            mean = [0.0 if (m != m) else float(m) for m in mean]
+        else:
+            # fallbacks
+            mean = [0.0 for _ in feature_names]
+            std = [1.0 for _ in feature_names]
+        (workdir / "feature_names.json").write_text(json.dumps(feature_names, indent=2))
+        (workdir / "scaler.json").write_text(json.dumps({"mean": mean, "std": std}, indent=2))
+    except Exception as e:
+        logger.warning(f"failed to write feature_names/scaler artifacts: {e}")
 
     # model
     mkt_dim = int(mkt_ctx["mkt_feat"].size(1)) if mkt_ctx is not None else 0
@@ -390,8 +414,11 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     logger.info(f"[TEST] RMSE = {te_rmse:.4f} | MAE = {te_mae:.4f} | MSE = {te_loss:.4f}")
 
     # save
-    ckpt_path = workdir / "mv_dgt_ckpt.pt"
-    torch.save({"state_dict": model.state_dict(), "meta": meta}, ckpt_path)
+    ckpt_path = workdir / "ckpt.pt"
+    try:
+        torch.save({"state_dict": model.state_dict(), "meta": meta}, ckpt_path)
+    except Exception as e:
+        logger.warning(f"failed to save checkpoint to ckpt.pt: {e}")
     logger.info(f"[OK] wrote {ckpt_path}")
 
     safe_close_tb(writer)
