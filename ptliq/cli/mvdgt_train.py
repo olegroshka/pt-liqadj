@@ -15,7 +15,7 @@ app = typer.Typer(no_args_is_help=True)
 def app_main(
     workdir: Path = typer.Option(Path("data/mvdgt/exp001"), help="Working directory with mvdgt_meta.json, samples, masks"),
     pyg_dir: Path = typer.Option(Path("data/pyg"), help="PyG artifacts dir (pyg_graph.pt, market_index.parquet)"),
-    outdir: Path = typer.Option(Path(os.getenv("PTLIQ_DEFAULT_MODELS_DIR", "models/mvdgt")), help="Model output dir"),
+    outdir: Path | None = typer.Option(None, help="Model output dir (defaults to workdir when not provided)"),
     epochs: int = typer.Option(5),
     lr: float = typer.Option(1e-3),
     weight_decay: float = typer.Option(1e-4),
@@ -40,11 +40,14 @@ def app_main(
     batch_size = int(_norm(batch_size, 512))
     seed = int(_norm(seed, 17))
     device_str = str(_norm(device_str, "cuda" if torch.cuda.is_available() else "cpu"))
-    outdir = Path(_norm(outdir, Path(os.getenv("PTLIQ_DEFAULT_MODELS_DIR", "models/mvdgt"))))
+    outdir_opt = _norm(outdir, None)
+    # Backward-compatible default: if outdir not provided, save under workdir
+    outdir = Path(outdir_opt) if outdir_opt is not None else Path(workdir)
 
     cfg = MVDGTTrainConfig(
         workdir=workdir,
         pyg_dir=pyg_dir,
+        outdir=outdir,
         epochs=epochs,
         lr=lr,
         weight_decay=weight_decay,

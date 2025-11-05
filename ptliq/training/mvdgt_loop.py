@@ -47,6 +47,7 @@ class MVDGTTrainConfig:
     # paths
     workdir: Path
     pyg_dir: Path
+    outdir: Path
     # hparams
     epochs: int = 5
     lr: float = 1e-3
@@ -56,7 +57,7 @@ class MVDGTTrainConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     # logging
     enable_tb: bool = True
-    tb_log_dir: Optional[str] = None  # default to <workdir>/tb when None
+    tb_log_dir: Optional[str] = None  # default to <outdir>/tb when None
     enable_tqdm: bool = True
     log_every: int = 50  # batch logging interval
     # attention TB logging
@@ -143,17 +144,19 @@ def _metrics_bps(y_true: torch.Tensor, y_pred: torch.Tensor) -> dict[str, float]
 def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     """
     Train the MV-DGT model using artifacts produced by the dataset builder.
-    Saves a checkpoint under <workdir>/ckpt.pt and returns metrics.
-    Adds optional TensorBoard logging and tqdm progress bars similar to GAT loop.
+    Save ALL model-related artifacts under <outdir> (checkpoint, configs, scaler, features, metrics, logs),
+    while reading dataset artifacts from <workdir>.
     """
     _set_seed(cfg.seed)
     device = torch.device(cfg.device)
 
     workdir = Path(cfg.workdir)
     pyg_dir = Path(cfg.pyg_dir)
+    outdir = Path(cfg.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
 
-    # --- logging setup via util
-    logger = get_logger("ptliq.training.mvdgt", workdir, filename="train_mvdgt.log")
+    # --- logging setup via util (log file under outdir/out by default)
+    logger = get_logger("ptliq.training.mvdgt", outdir, filename="train_mvdgt.log")
 
     # --- load meta & artifacts
     meta = json.loads((workdir / "mvdgt_meta.json").read_text())
@@ -166,13 +169,9 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
             if isinstance(v, Path):
                 cfg_dict[k] = str(v)
         logger.info("training_config=" + json.dumps(cfg_dict, ensure_ascii=False))
-        # persist a copy under out/
+        # persist a copy under outdir
         try:
-            out_dir = workdir / "out"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "train_config.json").write_text(json.dumps(cfg_dict, indent=2))
-            # also mirror at workdir root so pack CLI can find it
-            (workdir / "train_config.json").write_text(json.dumps(cfg_dict, indent=2))
+            (outdir / "train_config.json").write_text(json.dumps(cfg_dict, indent=2))
         except Exception:
             pass
     except Exception:
@@ -254,8 +253,8 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
             # fallbacks
             mean = [0.0 for _ in feature_names]
             std = [1.0 for _ in feature_names]
-        (workdir / "feature_names.json").write_text(json.dumps(feature_names, indent=2))
-        (workdir / "scaler.json").write_text(json.dumps({"mean": mean, "std": std}, indent=2))
+        (outdir / "feature_names.json").write_text(json.dumps(feature_names, indent=2))
+        (outdir / "scaler.json").write_text(json.dumps({"mean": mean, "std": std}, indent=2))
     except Exception as e:
         logger.warning(f"failed to write feature_names/scaler artifacts: {e}")
 
@@ -268,7 +267,7 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     cfg.model.use_market = bool(mkt_dim > 0)
     # persist JSON alongside training artifacts
     try:
-        (workdir / "model_config.json").write_text(json.dumps(asdict(cfg.model), indent=2))
+        (outdir / "model_config.json").write_text(json.dumps(asdict(cfg.model), indent=2))
     except Exception:
         pass
 
@@ -326,7 +325,7 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     loss_fn = torch.nn.SmoothL1Loss(reduction="none")
 
     # TensorBoard writer (optional)
-    writer = setup_tb(enable_tb=cfg.enable_tb, workdir=workdir, tb_log_dir=cfg.tb_log_dir)
+    writer = setup_tb(enable_tb=cfg.enable_tb, workdir=outdir, tb_log_dir=cfg.tb_log_dir)
 
     # progress bar util
     def _tqdm(iterable, total=None, **kwargs):
@@ -447,7 +446,7 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
         "meta": meta,
         "model_config": asdict(cfg.model),
     }
-    ckpt_path = workdir / "ckpt.pt"
+    ckpt_path = outdir / "ckpt.pt"
     try:
         torch.save(ckpt_obj, ckpt_path)
     except Exception as e:

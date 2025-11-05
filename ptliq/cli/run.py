@@ -178,6 +178,7 @@ def app_main(
         metrics = _mvdgt_train(_MVDGTTrainCfg(
             workdir=mvdgt_out,
             pyg_dir=pyg_dir,
+            outdir=models_dir,
             epochs=epochs,
             lr=lr,
             weight_decay=weight_decay,
