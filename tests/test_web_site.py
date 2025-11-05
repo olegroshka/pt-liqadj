@@ -42,11 +42,13 @@ def test_to_dataframe_and_filtering_roundtrip():
     ]
 
     df = to_dataframe(rows, preds)
-    assert list(df.columns) == ["Portfolio Id", "Isin", ("%s" % SCORE_ADJUSTMENT)]
+    assert list(df.columns) == ["Portfolio Id", "Isin", "Side", ("%s" % SCORE_ADJUSTMENT)]
     assert df.shape[0] == 3
     # order preserved and ids copied from input/response
     assert df.loc[0, "Portfolio Id"] == "P1" and df.loc[0, "Isin"] == "US1"
     assert df.loc[1, "Portfolio Id"] == "P1" and df.loc[1, "Isin"] == "US2"
+    # side is optional; with given inputs it's None
+    assert df["Side"].isna().all()
     # filtering by isin
     df_f = filter_dataframe(df, sel_portfolios=None, sel_isins=["US2", "US3"])
     assert df_f["Isin"].tolist() == ["US2", "US3"]

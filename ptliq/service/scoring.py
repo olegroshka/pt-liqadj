@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Protocol, runtime_checkable, Sequence
 import io, json, zipfile
 import numpy as np
 import torch
+import logging
 
 from ptliq.training.loop import load_model_for_eval
 import math

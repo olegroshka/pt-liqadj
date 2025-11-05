@@ -293,6 +293,14 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
 
     # datasets
     samp = pd.read_parquet(workdir / "samples.parquet")
+    # Also persist a copy of samples.parquet into outdir for serving/UI convenience
+    try:
+        out_samp_path = outdir / "samples.parquet"
+        # Re-write via pandas to preserve schema and avoid filesystem hardlinks issues
+        samp.to_parquet(out_samp_path, index=False)
+        logger.info(f"copied samples.parquet to outdir: {out_samp_path}")
+    except Exception as e:
+        logger.warning(f"failed to copy samples.parquet to outdir: {e}")
 
     tr = _DS(samp[samp["split"] == "train"])  # type: ignore[index]
     va = _DS(samp[samp["split"] == "val"])    # type: ignore[index]

@@ -43,6 +43,7 @@ def app_main(
     device: str = typer.Option("cpu"),
     model: str = typer.Option("mlp", help="Which model to serve: 'mlp' (packaged) or 'dgt' (graph workdir)"),
     force: bool = typer.Option(False, help="Start even if an existing pidfile is present"),
+    verbose: bool = typer.Option(False, help="Enable verbose logging (DEBUG level and uvicorn debug)"),
 ):
     """
     Serve the model with FastAPI. Accepts either a model directory or a packaged zip.
@@ -56,7 +57,14 @@ def app_main(
     if package is None:
         raise typer.BadParameter("--package is required when starting the server")
 
+    # Configure logging early
+    import logging
+    log_level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(level=log_level, format="[%(levelname)s] %(name)s: %(message)s")
+    logger = logging.getLogger("ptliq.cli.serve")
+
     pidfile = _pidfile_path(port)
+    logger.info(f"starting ptliq-serve on {host}:{port} model={model} package={package} device_opt={device} pidfile={pidfile}")
     if pidfile.exists() and not force:
         try:
             pid = int(pidfile.read_text().strip())
@@ -113,7 +121,8 @@ def app_main(
         else:
             scorer = MLPScorer.from_zip(package, device=device)
     api = create_app(scorer)
-    uvicorn.run(api, host=host, port=port, log_level="info")
+    uvicorn_log_level = "debug" if verbose else "info"
+    uvicorn.run(api, host=host, port=port, log_level=uvicorn_log_level)
 
 
 @app.command("stop")

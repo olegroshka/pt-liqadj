@@ -5,6 +5,7 @@ from pathlib import Path
 import atexit
 import typer
 from rich import print
+import logging
 from ptliq.web.site import build_ui
 
 PID_ENV = "PTLIQ_WEB_PIDFILE"
@@ -42,6 +43,8 @@ def app_main(
     open_browser: bool = typer.Option(True, help="Open the UI in browser (use --no-open-browser to disable)"),
     share: bool = typer.Option(False, help="Create a public share URL (requires external network)"),
     force: bool = typer.Option(False, help="Start even if an existing pidfile is present (may replace a stale one)"),
+    model_dir: Path = typer.Option(Path("models/dgt0"), help="Path to model run directory; if it contains an 'out' subdir with samples.parquet, that will be used."),
+    verbose: bool = typer.Option(False, help="Enable verbose logging (diagnostics about samples lookup)"),
 ):
     """
     Launch a minimal website (Gradio) for submitting JSON payloads to the scoring API
@@ -89,7 +92,38 @@ def app_main(
     os.environ.setdefault("GRADIO_USE_CDN", "false")
     os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "false")
 
-    ui = build_ui(api_url)
+    # Configure logging
+    log_level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(level=log_level, format="[%(levelname)s] %(name)s: %(message)s")
+    logger = logging.getLogger("ptliq.web.cli")
+
+    # Resolve a workdir that contains samples.parquet (prefer <model_dir>/out)
+    resolved_workdir = None
+    try:
+        md = Path(model_dir)
+        logger.info(f"model_dir provided: {md}")
+        cand1 = md / "out"
+        cand2 = md
+        cand1_exists = (cand1 / "samples.parquet").exists()
+        cand2_exists = (cand2 / "samples.parquet").exists()
+        logger.info(f"checking samples: {cand1/'samples.parquet'} exists={cand1_exists}")
+        logger.info(f"checking samples: {cand2/'samples.parquet'} exists={cand2_exists}")
+        if cand1_exists:
+            resolved_workdir = cand1
+            logger.info(f"resolved workdir: {resolved_workdir}")
+        elif cand2_exists:
+            resolved_workdir = cand2
+            logger.info(f"resolved workdir: {resolved_workdir}")
+        else:
+            logger.warning("samples.parquet not found under model_dir; UI will use fallback example payload")
+    except Exception as e:
+        logger.exception(f"error while resolving model_dir: {e}")
+        resolved_workdir = None
+
+    if resolved_workdir is not None:
+        ui = build_ui(api_url, workdir=resolved_workdir)
+    else:
+        ui = build_ui(api_url)
     # Avoid any external calls or analytics that may hang in restricted networks.
     ui.launch(
         server_name=host,
