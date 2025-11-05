@@ -1,12 +1,32 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Protocol, runtime_checkable, Sequence
 import io, json, zipfile
 import numpy as np
 import torch
 
 from ptliq.training.loop import load_model_for_eval
+
+
+@runtime_checkable
+class HasFeatureNames(Protocol):
+    feature_names: Sequence[str]
+
+
+@runtime_checkable
+class Scorer(Protocol):
+    """Scoring interface for serving.
+
+    Any scorer must expose:
+      - bundle.feature_names for the /health endpoint
+      - score_many(rows) -> 1D np.ndarray of floats
+    """
+
+    bundle: HasFeatureNames
+
+    def score_many(self, rows: List[Dict[str, Any]]) -> np.ndarray: ...
+
 
 @dataclass
 class ModelBundle:
@@ -17,6 +37,7 @@ class ModelBundle:
     dropout: float
     model_dir: Path | None  # if loaded from folder (training artifacts)
     ckpt_bytes: bytes | None  # if loaded from zip
+
 
 def _load_bundle_from_dir(path: Path) -> ModelBundle:
     path = Path(path)
@@ -32,6 +53,7 @@ def _load_bundle_from_dir(path: Path) -> ModelBundle:
         model_dir=path,
         ckpt_bytes=None,
     )
+
 
 def _load_bundle_from_zip(zip_path: Path) -> ModelBundle:
     with zipfile.ZipFile(zip_path, "r") as z:
@@ -49,18 +71,19 @@ def _load_bundle_from_zip(zip_path: Path) -> ModelBundle:
         ckpt_bytes=ckpt,
     )
 
-class Scorer:
+
+class MLPScorer:
     def __init__(self, bundle: ModelBundle, device: str = "cpu"):
         self.bundle = bundle
         self.device = "cpu" if device != "cuda" or not torch.cuda.is_available() else "cuda"
         self._load_model()
 
     @classmethod
-    def from_dir(cls, model_dir: Path, device: str = "cpu") -> "Scorer":
+    def from_dir(cls, model_dir: Path, device: str = "cpu") -> "MLPScorer":
         return cls(_load_bundle_from_dir(Path(model_dir)), device=device)
 
     @classmethod
-    def from_zip(cls, zip_path: Path, device: str = "cpu") -> "Scorer":
+    def from_zip(cls, zip_path: Path, device: str = "cpu") -> "MLPScorer":
         return cls(_load_bundle_from_zip(Path(zip_path)), device=device)
 
     def _load_model(self) -> None:

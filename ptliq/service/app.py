@@ -5,6 +5,7 @@ import numpy as np
 from .dtypes import ScoreRequest, ScoreResponse
 from .scoring import Scorer
 
+
 def create_app(scorer: Scorer) -> FastAPI:
     app = FastAPI(title="pt-liqadj", version="0.1.0")
 

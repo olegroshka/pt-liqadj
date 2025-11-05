@@ -6,7 +6,7 @@ import atexit
 import typer
 import uvicorn
 from rich import print
-from ptliq.service.scoring import Scorer
+from ptliq.service.scoring import MLPScorer
 from ptliq.service.app import create_app
 
 PID_ENV = "PTLIQ_SERVE_PIDFILE"
@@ -86,9 +86,9 @@ def app_main(
 
     package = Path(package)
     if package.is_dir():
-        scorer = Scorer.from_dir(package, device=device)
+        scorer = MLPScorer.from_dir(package, device=device)
     else:
-        scorer = Scorer.from_zip(package, device=device)
+        scorer = MLPScorer.from_zip(package, device=device)
     api = create_app(scorer)
     uvicorn.run(api, host=host, port=port, log_level="info")
 

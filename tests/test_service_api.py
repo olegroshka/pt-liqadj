@@ -2,7 +2,7 @@ from pathlib import Path
 import json
 import numpy as np
 from fastapi.testclient import TestClient
-from ptliq.service.scoring import Scorer
+from ptliq.service.scoring import MLPScorer
 from ptliq.service.app import create_app
 from ptliq.data.simulate import SimParams, simulate
 from ptliq.data.split import compute_default_ranges, write_ranges
@@ -36,7 +36,7 @@ def test_service_health_and_score(tmp_path: Path):
     (mdir / "feature_names.json").write_text(json.dumps(feat_cols))
     (mdir / "train_config.json").write_text(json.dumps({"hidden": [16], "dropout": 0.0}))
 
-    scorer = Scorer.from_dir(mdir, device="cpu")
+    scorer = MLPScorer.from_dir(mdir, device="cpu")
     app = create_app(scorer)
     client = TestClient(app)
 

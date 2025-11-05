@@ -4,7 +4,7 @@ import json
 import pandas as pd
 import typer
 from rich import print
-from ptliq.service.scoring import Scorer
+from ptliq.service.scoring import MLPScorer
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -33,7 +33,7 @@ def app_main(
     """
     Score a batch of rows offline. Rows must contain f_* features; missing values are imputed to the scaler mean.
     """
-    scorer = Scorer.from_dir(package, device=device) if Path(package).is_dir() else Scorer.from_zip(package, device=device)
+    scorer = MLPScorer.from_dir(package, device=device) if Path(package).is_dir() else MLPScorer.from_zip(package, device=device)
     rows = _read_records(input_path)
     y = scorer.score_many(rows)
 
