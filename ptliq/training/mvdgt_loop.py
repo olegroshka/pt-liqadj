@@ -160,6 +160,11 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
 
     # --- load meta & artifacts
     meta = json.loads((workdir / "mvdgt_meta.json").read_text())
+    # persist a copy of meta into outdir for DGTScorer to find
+    try:
+        (outdir / "mvdgt_meta.json").write_text(json.dumps(meta, indent=2))
+    except Exception:
+        logger.warning("failed to copy mvdgt_meta.json to outdir")
 
     # --- log training config early
     try:
@@ -178,6 +183,12 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
         logger.warning("failed to log training config")
     data = torch.load(meta["files"]["pyg_graph"], map_location="cpu", weights_only=False)
     view_masks = torch.load(workdir / "view_masks.pt", map_location="cpu", weights_only=False)
+    # also persist a copy to outdir for DGTScorer compatibility
+    try:
+        vm_cpu = {k: v.detach().cpu() for k, v in view_masks.items()}
+        torch.save(vm_cpu, outdir / "view_masks.pt")
+    except Exception:
+        logger.warning("failed to copy view_masks.pt to outdir")
 
     # inputs: node features (from PyG), edge stuff for building the model
     x = data.x.float().to(device)
