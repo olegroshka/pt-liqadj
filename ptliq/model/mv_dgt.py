@@ -107,6 +107,7 @@ class MultiViewDGT(nn.Module):
         use_portfolio: bool = True,
         use_market: bool = True,
         trade_dim: int = 0,
+        view_names: Optional[list[str]] = None,
     ):
         super().__init__()
         if TransformerConv is None:
@@ -115,7 +116,7 @@ class MultiViewDGT(nn.Module):
 
         self.use_portfolio = use_portfolio
         self.use_market = use_market and (mkt_dim > 0)
-        self.view_names = ["struct", "port", "corr_global", "corr_local"]
+        self.view_names = list(view_names) if (view_names is not None and len(view_names) > 0) else ["struct", "port", "corr_global", "corr_local"]
 
         # input projection
         self.enc = nn.Sequential(

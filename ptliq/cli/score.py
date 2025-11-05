@@ -28,7 +28,7 @@ def app_main(
     package: Path = typer.Option(..., help="model dir or model zip"),
     input_path: Path = typer.Option(..., help="parquet | json | jsonl with f_* fields"),
     output_path: Path = typer.Option(..., help="parquet|jsonl for predictions"),
-    device: str = typer.Option("cpu"),
+    device: str = typer.Option("auto"),
 ):
     """
     Score a batch of rows offline. Rows must contain f_* features; missing values are imputed to the scaler mean.

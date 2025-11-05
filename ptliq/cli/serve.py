@@ -6,6 +6,7 @@ import atexit
 import typer
 import uvicorn
 from rich import print
+import torch
 from ptliq.service.scoring import MLPScorer, DGTScorer
 from ptliq.service.app import create_app
 
@@ -87,6 +88,19 @@ def app_main(
 
     package = Path(package)
     m = (model or "").strip().lower()
+
+    # normalize device option: allow 'auto' to pick best available
+    dev_opt = (device or "").strip().lower()
+    if dev_opt in ("", "auto", None):
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+    else:
+        device = dev_opt
+
     if m == "dgt":
         if not package.is_dir():
             print("[red]For model='dgt', --package must be a directory containing graph artifacts (workdir).")

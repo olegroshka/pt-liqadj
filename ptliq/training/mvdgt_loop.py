@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 import pandas as pd
 import torch
 import logging
+import numpy as np
 
 # Optional progress bar
 try:  # pragma: no cover - tqdm is optional
@@ -95,6 +96,47 @@ def _load_context(meta_files: Dict[str, Any], device: torch.device) -> tuple[Opt
     return mkt_ctx, port_ctx
 
 
+def _compute_market_preproc(samples_df: pd.DataFrame, mkt_ctx: Optional[dict], logger) -> Optional[dict]:
+    """
+    Compute mean/std for market features and a sign calibration based on a small ridge fit of y on z-scored mkt_feat.
+    Uses TRAIN rows only. Returns {"mean": list, "std": list, "sign": float} or None.
+    """
+    try:
+        if (mkt_ctx is None) or (not isinstance(mkt_ctx, dict)) or ("mkt_feat" not in mkt_ctx):
+            return None
+        mf = mkt_ctx["mkt_feat"].float()  # [T, F]
+        m_mean = mf.mean(dim=0)
+        m_std = mf.std(dim=0, unbiased=False).clamp_min(1e-6)
+        df = samples_df[samples_df["split"] == "train"]["date_idx"].astype(int)
+        ycol = samples_df[samples_df["split"] == "train"]["y"].astype(float)
+        if len(df) < 10:
+            return {"mean": m_mean.detach().cpu().tolist(), "std": m_std.detach().cpu().tolist(), "sign": 1.0}
+        idx = torch.as_tensor(df.to_numpy(), dtype=torch.long)
+        M = mf.index_select(0, idx).float()  # [N, F]
+        y = torch.as_tensor(ycol.to_numpy(), dtype=torch.float32).view(-1, 1)
+        Mz = (M - m_mean) / m_std
+        lam = 1e-3
+        ATA = Mz.T @ Mz + lam * torch.eye(Mz.size(1))
+        b = torch.linalg.solve(ATA, Mz.T @ y)  # [F,1]
+        fit = (Mz @ b).view(-1)
+        try:
+            fit_np = fit.detach().cpu().numpy()
+            y_np = y.view(-1).detach().cpu().numpy()
+            corr = float(np.corrcoef(fit_np, y_np)[0, 1])
+            if not (corr == corr):  # NaN guard
+                corr = 0.0
+        except Exception:
+            corr = 0.0
+        sgn = 1.0 if corr >= 0.0 else -1.0
+        return {"mean": m_mean.detach().cpu().tolist(), "std": m_std.detach().cpu().tolist(), "sign": float(sgn)}
+    except Exception as e:
+        try:
+            logger.warning(f"market preproc computation failed: {e}")
+        except Exception:
+            pass
+        return None
+
+
 class _DS(torch.utils.data.Dataset):
     def __init__(self, df: pd.DataFrame):
         self.df = df.reset_index(drop=True)
@@ -163,6 +205,18 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     # persist a copy of meta into outdir for DGTScorer to find
     try:
         (outdir / "mvdgt_meta.json").write_text(json.dumps(meta, indent=2))
+        # augment meta in outdir with market_index if it exists adjacent to pyg graph
+        try:
+            meta_out = dict(meta)
+            files = dict(meta_out.get("files", {}))
+            pyg_graph_path = Path(files.get("pyg_graph", ""))
+            mkt_index_guess = pyg_graph_path.parent / "market_index.parquet"
+            if mkt_index_guess.exists():
+                files["market_index"] = str(mkt_index_guess)
+                meta_out["files"] = files
+                (outdir / "mvdgt_meta.json").write_text(json.dumps(meta_out, indent=2))
+        except Exception:
+            logger.warning("failed to augment mvdgt_meta.json with market_index")
     except Exception:
         logger.warning("failed to copy mvdgt_meta.json to outdir")
 
@@ -247,10 +301,36 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     va_loader = torch.utils.data.DataLoader(va, batch_size=int(cfg.batch_size), shuffle=False, collate_fn=_collate)
     te_loader = torch.utils.data.DataLoader(te, batch_size=int(cfg.batch_size), shuffle=False, collate_fn=_collate)
 
+    # --- Market preproc (mean/std + orientation sign) from TRAIN; persist and use during training
+    mkt_mean_t = None
+    mkt_std_t = None
+    mkt_sign_t = None
+    try:
+        pre = _compute_market_preproc(samp, mkt_ctx, logger)
+        if pre is not None:
+            try:
+                (outdir / "market_preproc.json").write_text(json.dumps(pre, indent=2))
+            except Exception:
+                logger.warning("failed to write market_preproc.json")
+            try:
+                mkt_mean_t = torch.tensor(pre["mean"], dtype=torch.float32, device=device)
+                mkt_std_vals = [float(v) if (v is not None and float(v) > 0.0) else 1.0 for v in pre["std"]]
+                mkt_std_t = torch.tensor(mkt_std_vals, dtype=torch.float32, device=device)
+                mkt_sign_t = torch.tensor(float(pre.get("sign", 1.0)), dtype=torch.float32, device=device)
+            except Exception as e:
+                logger.warning(f"failed to build market preproc tensors: {e}")
+    except Exception as e:
+        logger.warning(f"market preproc computation failed: {e}")
+
     # --- Persist pack() compatibility artifacts: feature_names.json and scaler.json ---
     # For MV-DGT, the only per-trade numeric inputs the loop directly uses are
     # the trade features [side_sign, log_size]. We expose these as feature_names
     # and compute simple mean/std from the TRAIN split to populate scaler.json.
+    # Additionally, we construct scaler tensors on the training device to standardize
+    # trade features during both training and evaluation (aligns with serving).
+    # Defaults in case artifact writing fails
+    scaler_mean_t = torch.tensor([0.0, 0.0], dtype=torch.float32, device=device)
+    scaler_std_t = torch.tensor([1.0, 1.0], dtype=torch.float32, device=device)
     try:
         feature_names = ["side_sign", "log_size"]
         tr_df = tr.df if hasattr(tr, "df") else None  # type: ignore[attr-defined]
@@ -266,6 +346,13 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
             std = [1.0 for _ in feature_names]
         (outdir / "feature_names.json").write_text(json.dumps(feature_names, indent=2))
         (outdir / "scaler.json").write_text(json.dumps({"mean": mean, "std": std}, indent=2))
+        # Build training-time scaler tensors on the correct device
+        scaler_mean_t = torch.tensor(mean, dtype=torch.float32, device=device)
+        scaler_std_t = torch.tensor([1.0 if (s is None or not (s > 0.0)) else float(s) for s in std],
+                                    dtype=torch.float32, device=device)
+        # Guard: feature layout must match configured trade_dim
+        assert len(feature_names) == int(cfg.model.trade_dim), \
+            f"trade_dim={cfg.model.trade_dim} but feature_names has {len(feature_names)} items"
     except Exception as e:
         logger.warning(f"failed to write feature_names/scaler artifacts: {e}")
 
@@ -294,6 +381,7 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
         use_portfolio=bool(cfg.model.use_portfolio),
         use_market=bool(cfg.model.use_market if cfg.model.use_market is not None else (mkt_dim > 0)),
         trade_dim=int(cfg.model.trade_dim),
+        view_names=list(cfg.model.views),
     ).to(device)
 
     # --- runtime sanity prints for correlation gate and edge counts
@@ -356,17 +444,28 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
                 anchor = batch["node_id"].long().to(device)
                 pf_gid = batch["pf_gid"].long().to(device)
                 y = batch["y"].float().to(device)
-                # market row pick
+                # market row pick (with optional z-score + orientation sign)
                 if mkt_ctx is not None:
                     di = batch["date_idx"].long().clamp_min(0).to(device)
-                    mkt = mkt_ctx["mkt_feat"].index_select(0, di)
+                    mkt_raw = mkt_ctx["mkt_feat"].index_select(0, di)
+                    if (mkt_mean_t is not None) and (mkt_std_t is not None):
+                        denom_m = torch.where(mkt_std_t <= 0, torch.ones_like(mkt_std_t), mkt_std_t)
+                        mkt = (mkt_raw - mkt_mean_t) / denom_m
+                        mkt = torch.nan_to_num(mkt, nan=0.0, posinf=0.0, neginf=0.0)
+                        if mkt_sign_t is not None:
+                            mkt = mkt * mkt_sign_t
+                    else:
+                        mkt = mkt_raw
                 else:
                     mkt = None
-                # trade features
-                trade = torch.stack([
+                # trade features (standardized using train-split scaler tensors)
+                trade_raw = torch.stack([
                     batch["side_sign"].float().to(device),
                     batch["log_size"].float().to(device),
                 ], dim=1)
+                denom = torch.where(scaler_std_t <= 0, torch.ones_like(scaler_std_t), scaler_std_t)
+                trade = (trade_raw - scaler_mean_t) / denom
+                trade = torch.nan_to_num(trade, nan=0.0, posinf=0.0, neginf=0.0)
 
                 # optionally capture attention stats this step
                 capture_attn = bool(

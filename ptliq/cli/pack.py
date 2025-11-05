@@ -9,7 +9,7 @@ app = typer.Typer(no_args_is_help=True)
 @app.command()
 def app_main(
     models_dir: Path = typer.Option(Path("models")),
-    run_id: str = typer.Option("exp001"),
+    run_id: str = typer.Option("mvdgt"),
     outdir: Path = typer.Option(Path("serving/packages")),
 ):
     """
