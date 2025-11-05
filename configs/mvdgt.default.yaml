@@ -44,10 +44,20 @@ data:
     # Optional: path to trades parquet (default: uses simulated trades under paths.raw_dir)
     # trades_path: data/raw/sim/trades.parquet
 
-    # Training hyperparameters
-    epochs: 5
-    lr: 0.001
-    weight_decay: 0.0001
-    batch_size: 512
-    seed: 17
-    device: auto  # "cuda" or "cpu"; "auto" picks cuda if available
+    # Training and model hyperparameters (mirror gat.default.yaml style)
+    train:
+      device: auto  # "cuda" or "cpu"; "auto" picks cuda if available
+      epochs: 5
+      lr: 0.001
+      weight_decay: 0.0001
+      batch_size: 512
+      seed: 17
+
+    model:
+      hidden: 128
+      heads: 2
+      dropout: 0.10
+      trade_dim: 2
+      use_portfolio: true
+      # order matters; corresponds to masks in view_masks.pt
+      views: [struct, port, corr_global, corr_local]

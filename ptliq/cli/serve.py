@@ -6,7 +6,7 @@ import atexit
 import typer
 import uvicorn
 from rich import print
-from ptliq.service.scoring import MLPScorer
+from ptliq.service.scoring import MLPScorer, DGTScorer
 from ptliq.service.app import create_app
 
 PID_ENV = "PTLIQ_SERVE_PIDFILE"
@@ -40,6 +40,7 @@ def app_main(
     host: str = typer.Option("127.0.0.1"),
     port: int = typer.Option(8011),
     device: str = typer.Option("cpu"),
+    model: str = typer.Option("mlp", help="Which model to serve: 'mlp' (packaged) or 'dgt' (graph workdir)"),
     force: bool = typer.Option(False, help="Start even if an existing pidfile is present"),
 ):
     """
@@ -85,10 +86,18 @@ def app_main(
     atexit.register(_cleanup)
 
     package = Path(package)
-    if package.is_dir():
-        scorer = MLPScorer.from_dir(package, device=device)
+    m = (model or "").strip().lower()
+    if m == "dgt":
+        if not package.is_dir():
+            print("[red]For model='dgt', --package must be a directory containing graph artifacts (workdir).")
+            raise typer.Exit(code=2)
+        scorer = DGTScorer.from_dir(package, device=device)
     else:
-        scorer = MLPScorer.from_zip(package, device=device)
+        # default to MLP packaged model
+        if package.is_dir():
+            scorer = MLPScorer.from_dir(package, device=device)
+        else:
+            scorer = MLPScorer.from_zip(package, device=device)
     api = create_app(scorer)
     uvicorn.run(api, host=host, port=port, log_level="info")
 

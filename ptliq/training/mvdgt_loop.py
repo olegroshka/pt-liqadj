@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import pandas as pd
 import torch
@@ -28,6 +28,21 @@ from ptliq.utils.logging_utils import get_logger, setup_tb, safe_close_tb
 
 
 @dataclass
+class MVDGTModelConfig:
+    hidden: int = 128
+    heads: int = 2
+    dropout: float = 0.10
+    trade_dim: int = 2
+    use_portfolio: bool = True
+    # graph view names (order matters if masks are stored per view)
+    views: List[str] = field(default_factory=lambda: ["struct", "port", "corr_global", "corr_local"])
+    # runtime-computed fields persisted for exact reconstruction at inference time
+    x_dim: Optional[int] = None
+    mkt_dim: Optional[int] = None
+    use_market: Optional[bool] = None
+
+
+@dataclass
 class MVDGTTrainConfig:
     # paths
     workdir: Path
@@ -47,6 +62,8 @@ class MVDGTTrainConfig:
     # attention TB logging
     enable_attn_tb: bool = False
     attn_log_every: int = 200  # batches
+    # model params (from YAML or CLI); defaults mirror previous hardcoded values
+    model: MVDGTModelConfig = field(default_factory=MVDGTModelConfig)
 
 
 def _set_seed(seed: int) -> None:
@@ -126,7 +143,7 @@ def _metrics_bps(y_true: torch.Tensor, y_pred: torch.Tensor) -> dict[str, float]
 def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     """
     Train the MV-DGT model using artifacts produced by the dataset builder.
-    Saves a checkpoint under <workdir>/mv_dgt_ckpt.pt and returns metrics.
+    Saves a checkpoint under <workdir>/ckpt.pt and returns metrics.
     Adds optional TensorBoard logging and tqdm progress bars similar to GAT loop.
     """
     _set_seed(cfg.seed)
@@ -244,18 +261,29 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
 
     # model
     mkt_dim = int(mkt_ctx["mkt_feat"].size(1)) if mkt_ctx is not None else 0
+
+    # --- populate dataclass with runtime-computed fields and persist for exact reconstruction
+    cfg.model.x_dim = int(x.size(1))
+    cfg.model.mkt_dim = int(mkt_dim)
+    cfg.model.use_market = bool(mkt_dim > 0)
+    # persist JSON alongside training artifacts
+    try:
+        (workdir / "model_config.json").write_text(json.dumps(asdict(cfg.model), indent=2))
+    except Exception:
+        pass
+
     model = MultiViewDGT(
-        x_dim=int(x.size(1)),
-        hidden=128,
-        heads=2,
-        dropout=0.1,
+        x_dim=int(cfg.model.x_dim or x.size(1)),
+        hidden=int(cfg.model.hidden),
+        heads=int(cfg.model.heads),
+        dropout=float(cfg.model.dropout),
         view_masks=view_masks,
         edge_index=edge_index,
         edge_weight=edge_weight,
-        mkt_dim=mkt_dim,
-        use_portfolio=True,
-        use_market=(mkt_dim > 0),
-        trade_dim=2,
+        mkt_dim=int(cfg.model.mkt_dim or mkt_dim),
+        use_portfolio=bool(cfg.model.use_portfolio),
+        use_market=bool(cfg.model.use_market if cfg.model.use_market is not None else (mkt_dim > 0)),
+        trade_dim=int(cfg.model.trade_dim),
     ).to(device)
 
     # --- runtime sanity prints for correlation gate and edge counts
@@ -414,12 +442,19 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
     logger.info(f"[TEST] RMSE = {te_rmse:.4f} | MAE = {te_mae:.4f} | MSE = {te_loss:.4f}")
 
     # save
+    ckpt_obj = {
+        "state_dict": model.state_dict(),
+        "meta": meta,
+        "model_config": asdict(cfg.model),
+    }
     ckpt_path = workdir / "ckpt.pt"
     try:
-        torch.save({"state_dict": model.state_dict(), "meta": meta}, ckpt_path)
+        torch.save(ckpt_obj, ckpt_path)
     except Exception as e:
         logger.warning(f"failed to save checkpoint to ckpt.pt: {e}")
-    logger.info(f"[OK] wrote {ckpt_path}")
+    else:
+        logger.info(f"[OK] wrote {ckpt_path}")
+
 
     safe_close_tb(writer)
 

@@ -21,7 +21,7 @@ from ptliq.viz.report import render_report
 # MV-DGT pieces
 from ptliq.cli.featurize import featurize_graph as _featurize_graph, featurize_pyg as _featurize_pyg
 from ptliq.features.build_mvdgt_dataset import build as _mvdgt_build
-from ptliq.training.mvdgt_loop import MVDGTTrainConfig as _MVDGTTrainCfg, train_mvdgt as _mvdgt_train
+from ptliq.training.mvdgt_loop import MVDGTTrainConfig as _MVDGTTrainCfg, MVDGTModelConfig as _MVDGTModelCfg, train_mvdgt as _mvdgt_train
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -150,14 +150,27 @@ def app_main(
         _mvdgt_build(trades_path=trades_path, graph_dir=graph_dir, pyg_dir=pyg_dir, outdir=mvdgt_out, split_train=split_train, split_val=split_val)
         print(f"[bold]MVDGT-BUILD[/bold] → {mvdgt_out}")
 
-        # Train MV-DGT
-        epochs = int(mvdgt_cfg.get("epochs", 5))
-        lr = float(mvdgt_cfg.get("lr", 1e-3))
-        weight_decay = float(mvdgt_cfg.get("weight_decay", 1e-4))
-        batch_size = int(mvdgt_cfg.get("batch_size", 512))
-        seed = int(mvdgt_cfg.get("seed", 17))
-        device_opt = mvdgt_cfg.get("device", "auto")
+        # Train MV-DGT (support both nested train/model sections and legacy flat keys)
+        train_node = mvdgt_cfg.get("train", {}) if isinstance(mvdgt_cfg.get("train"), dict) else {}
+        model_node = mvdgt_cfg.get("model", {}) if isinstance(mvdgt_cfg.get("model"), dict) else {}
+
+        epochs = int(train_node.get("epochs", mvdgt_cfg.get("epochs", 5)))
+        lr = float(train_node.get("lr", mvdgt_cfg.get("lr", 1e-3)))
+        weight_decay = float(train_node.get("weight_decay", mvdgt_cfg.get("weight_decay", 1e-4)))
+        batch_size = int(train_node.get("batch_size", mvdgt_cfg.get("batch_size", 512)))
+        seed = int(train_node.get("seed", mvdgt_cfg.get("seed", 17)))
+        device_opt = train_node.get("device", mvdgt_cfg.get("device", "auto"))
         device_str = ("cuda" if torch.cuda.is_available() else "cpu") if str(device_opt).lower() == "auto" else str(device_opt)
+
+        # Build model config (defaults mirror training loop dataclass)
+        model_cfg = _MVDGTModelCfg(
+            hidden=int(model_node.get("hidden", 128)),
+            heads=int(model_node.get("heads", 2)),
+            dropout=float(model_node.get("dropout", 0.10)),
+            trade_dim=int(model_node.get("trade_dim", 2)),
+            use_portfolio=bool(model_node.get("use_portfolio", True)),
+            views=list(model_node.get("views", ["struct", "port", "corr_global", "corr_local"]))
+        )
 
         # models dir via env for trainer default
         os.environ["PTLIQ_DEFAULT_MODELS_DIR"] = str(models_dir)
@@ -172,6 +185,7 @@ def app_main(
             seed=seed,
             device=device_str,
             tb_log_dir=str(models_dir/"tb"),
+            model=model_cfg,
         ))
         # persist metrics
         (models_dir/"mvdgt_metrics.json").write_text(json.dumps(metrics, indent=2))
