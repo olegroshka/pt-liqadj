@@ -1,0 +1,16 @@
+{
+  "hidden": 128,
+  "heads": 2,
+  "dropout": 0.1,
+  "trade_dim": 2,
+  "use_portfolio": true,
+  "views": [
+    "struct",
+    "port",
+    "corr_global",
+    "corr_local"
+  ],
+  "x_dim": 14,
+  "mkt_dim": 14,
+  "use_market": true
+}

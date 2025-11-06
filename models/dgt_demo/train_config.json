@@ -1,0 +1,33 @@
+{
+  "workdir": "data/mvdgt/exp001",
+  "pyg_dir": "data/pyg",
+  "outdir": "models/dgt0",
+  "epochs": 20,
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "batch_size": 1024,
+  "seed": 17,
+  "device": "cuda",
+  "enable_tb": true,
+  "tb_log_dir": "models/dgt0/tb",
+  "enable_tqdm": true,
+  "log_every": 50,
+  "enable_attn_tb": false,
+  "attn_log_every": 200,
+  "model": {
+    "hidden": 128,
+    "heads": 2,
+    "dropout": 0.1,
+    "trade_dim": 2,
+    "use_portfolio": true,
+    "views": [
+      "struct",
+      "port",
+      "corr_global",
+      "corr_local"
+    ],
+    "x_dim": null,
+    "mkt_dim": null,
+    "use_market": null
+  }
+}

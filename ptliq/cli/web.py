@@ -43,7 +43,7 @@ def app_main(
     open_browser: bool = typer.Option(True, help="Open the UI in browser (use --no-open-browser to disable)"),
     share: bool = typer.Option(False, help="Create a public share URL (requires external network)"),
     force: bool = typer.Option(False, help="Start even if an existing pidfile is present (may replace a stale one)"),
-    model_dir: Path = typer.Option(Path("models/dgt0"), help="Path to model run directory; if it contains an 'out' subdir with samples.parquet, that will be used."),
+    model_dir: Path = typer.Option(Path("models/dgt_demo"), help="Path to model run directory; if it contains an 'out' subdir with samples.parquet, that will be used."),
     verbose: bool = typer.Option(False, help="Enable verbose logging (diagnostics about samples lookup)"),
 ):
     """
