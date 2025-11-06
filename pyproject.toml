@@ -19,7 +19,7 @@ dependencies = [
     "uvicorn",
     "tensorboard",
     "requests",
-    "gradio>=4.44.1,<5",
+    "gradio==5.49.1",
 ]
 
 [project.scripts]
