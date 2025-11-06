@@ -449,7 +449,7 @@ The website accepts a JSON payload like:
 {"rows":[{"isin":"US1","f_a":1.2,"f_b":-0.7},{"isin":"US2","f_a":0.0,"f_b":3.3}]}
 ```
 
-and displays a grid with columns `Portfolio Id | Isin | Liquidity score adjustment`, including multi-select filters.
+and displays a grid with columns `Portfolio Id | Isin | Portfolio Liquidity Impact (bps)`, including multi-select filters. Positive values indicate extra execution drag (worse), negative values indicate relief (better); this is interpreted by side (buy: +bps = higher paid price; sell: +bps = lower received price).
 
 Start the site (defaults to the local API server):
 

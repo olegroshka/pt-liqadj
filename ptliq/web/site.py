@@ -19,7 +19,7 @@ PORTFOLIO_ID = "Portfolio Id"
 
 SIDE = "Side"
 
-SCORE_ADJUSTMENT = "Liquidity Score Adjustment"
+SCORE_ADJUSTMENT = "Portfolio Liquidity Impact (bps)"
 
 try:
     import gradio as gr  # type: ignore
@@ -83,7 +83,7 @@ def to_dataframe(rows: List[Dict[str, Any]], preds: List[Dict[str, Any]]) -> pd.
     - Portfolio Id (copied from request/response "portfolio_id")
     - Isin (copied from request/response "isin")
     - Side (copied from request/response "side")
-    - Liquidity score adjustment (float value from response field "pred_bps")
+    - Portfolio liquidity impact (bps; from response field "pred_bps")
     Order is preserved by index.
     """
     n = min(len(rows), len(preds))
@@ -220,8 +220,79 @@ def build_ui(api: str | FastAPI, sample_source: Optional[str | Path] = None, wor
         # Fallback static example (compact one-line-per-row, required fields only)
         example_text = default_example_payload_json()
 
-    with gr.Blocks(title="Liquidity Adjustment Scoring") as demo:
-        gr.Markdown("## Liquidity Scoring Demo\nPaste JSON payload and score. Output grid can be filtered.")
+    # Default to Gradio's built-in Dark theme when available
+    # Also, style the Score button green via a scoped elem_id-specific CSS (safe across Gradio versions)
+    SCORE_BTN_CSS = """
+    /* Make the Score button green, with accessible contrast in dark mode */
+    /* Prefer variable overrides to play nice with Gradio's theming */
+    #btn-score {
+        --button-primary-background-fill: #10b981 !important; /* emerald-500 */
+        --button-primary-background-fill-hover: #059669 !important; /* emerald-600 */
+        --button-primary-text-color: #071317 !important; /* near-black for contrast */
+        --color-accent: #10b981 !important; /* some versions use this for primary */
+    }
+    /* Direct element rules as a hard override across versions */
+    #btn-score button,
+    #btn-score .gr-button,
+    button#btn-score {
+        background: #10b981 !important;
+        background-color: #10b981 !important; /* emerald-500 */
+        border-color: #059669 !important;     /* emerald-600 */
+        color: #071317 !important;            /* near-black for contrast */
+    }
+    #btn-score button:hover,
+    #btn-score .gr-button:hover,
+    button#btn-score:hover {
+        background: #059669 !important;
+        background-color: #059669 !important; /* emerald-600 */
+        border-color: #047857 !important;     /* emerald-700 */
+        color: #e6fffb !important;            /* keep readable */
+    }
+    #btn-score button:focus,
+    #btn-score .gr-button:focus,
+    button#btn-score:focus {
+        outline: 2px solid #34d399 !important; /* emerald-400 focus ring */
+        outline-offset: 2px;
+    }
+    """
+    blocks_kwargs = {"title": "Portfolio Liquidity Impact", "css": SCORE_BTN_CSS}
+    try:
+        # gradio themes API (e.g., gradio>=3.23)
+        dark_theme = gr.themes.Dark()
+        blocks_kwargs["theme"] = dark_theme
+    except Exception:
+        # Older Gradio versions without themes API; continue without specifying theme
+        pass
+
+    with gr.Blocks(**blocks_kwargs) as demo:
+        # Ensure dark theme by appending __theme=dark to the URL on first load
+        try:
+            js_force_dark = """
+            () => {
+              try {
+                const url = new URL(window.location);
+                if (url.searchParams.get('__theme') !== 'dark') {
+                  url.searchParams.set('__theme', 'dark');
+                  window.location.replace(url);
+                  return null;
+                }
+                // persist in settings/localStorage as well so future loads keep dark
+                const keys = [
+                  'gradio:theme_mode',
+                  'gradio-theme-mode',
+                  'theme_mode',
+                  'theme-mode'
+                ];
+                keys.forEach(k => { try { localStorage.setItem(k, 'dark'); } catch (e) {} });
+              } catch (e) {}
+              return null;
+            }
+            """
+            demo.load(None, js=js_force_dark)
+        except Exception:
+            # If the Gradio version does not support JS hooks, continue without enforcing via URL
+            pass
+        gr.Markdown("## Portfolio Liquidity Impact (bps)\nResidual impact from executing the portfolio jointly vs single-name baseline.\n\nSign convention by side: + = drag (worse), − = relief (better).\n- Buy: +bps means higher paid price (worse), −bps means improvement.\n- Sell: +bps means lower received price (worse), −bps means improvement.\n\nPaste JSON payload and score. Output grid can be filtered.")
         with gr.Row():
             inp = gr.Textbox(
                 label="JSON payload",
@@ -230,8 +301,29 @@ def build_ui(api: str | FastAPI, sample_source: Optional[str | Path] = None, wor
                 show_copy_button=True,
             )
         with gr.Row():
-            btn = gr.Button("Score", variant="primary")
+            btn = gr.Button("Score", variant="primary", elem_id="btn-score")
             btn_clear = gr.Button("Clear", variant="secondary")
+        
+        # JS safety net: if theme CSS overrides persist, force inline styles on the Score button
+        try:
+            js_force_green = """
+            () => {
+              try {
+                const host = document.getElementById('btn-score');
+                const el = host?.querySelector('button') || host;
+                if (el) {
+                  el.style.background = '#10b981';
+                  el.style.backgroundColor = '#10b981';
+                  el.style.borderColor = '#059669';
+                  el.style.color = '#071317';
+                }
+              } catch (e) {}
+              return null;
+            }
+            """
+            demo.load(None, js=js_force_green)
+        except Exception:
+            pass
         with gr.Row():
             portfolio_ms = gr.CheckboxGroup(choices=[], label="Filter: Portfolio Id", interactive=True)
             isin_ms = gr.Dropdown(choices=[], value=[], multiselect=True, label="Filter: Isin", filterable=True)

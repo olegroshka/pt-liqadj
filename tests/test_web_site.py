@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from ptliq.service.app import create_app
 from ptliq.web.site import parse_rows, to_dataframe, filter_dataframe, call_api, build_ui, merge_append_override
 
-SCORE_ADJUSTMENT = "Liquidity Score Adjustment"
+SCORE_ADJUSTMENT = "Portfolio Liquidity Impact (bps)"
 
 
 class DummyScorer:
