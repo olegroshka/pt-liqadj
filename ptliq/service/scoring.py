@@ -1,16 +1,16 @@
 from __future__ import annotations
+
+import json
+import math
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Protocol, runtime_checkable, Sequence
-import io, json, zipfile
-import numpy as np
-import torch
-import logging
-
-from ptliq.training.loop import load_model_for_eval
-import math
-import pandas as pd
 from typing import Optional
+
+import numpy as np
+import pandas as pd
+import torch
 
 from ptliq.model.mv_dgt import MultiViewDGT
 from ptliq.training.mvdgt_loop import MVDGTModelConfig
@@ -503,6 +503,17 @@ class DGTScorer:
             view_names=list(getattr(self._cfg_obj, "views", ["struct","port","corr_global","corr_local"])),
             use_pf_head=bool(getattr(self._cfg_obj, "use_pf_head", False)),
             pf_head_hidden=getattr(self._cfg_obj, "pf_head_hidden", None),
+            # portfolio attention wiring
+            use_portfolio_attn=bool(getattr(self._cfg_obj, "use_portfolio_attn", False)),
+            portfolio_attn_layers=int(getattr(self._cfg_obj, "portfolio_attn_layers", 1) or 1),
+            portfolio_attn_heads=int(getattr(self._cfg_obj, "portfolio_attn_heads", 4) or 4),
+            portfolio_attn_dropout=float(getattr(self._cfg_obj, "portfolio_attn_dropout", self._cfg_obj.dropout if getattr(self._cfg_obj, "dropout", None) is not None else 0.1) or 0.1),
+            portfolio_attn_hidden=(int(self._cfg_obj.get("portfolio_attn_hidden")) if isinstance(getattr(self._cfg_obj, "portfolio_attn_hidden", None), (int, float)) else None) if isinstance(self._cfg_obj, dict) else (int(getattr(self._cfg_obj, "portfolio_attn_hidden")) if (getattr(self._cfg_obj, "portfolio_attn_hidden", None) is not None) else None),
+            portfolio_attn_concat_trade=bool(getattr(self._cfg_obj, "portfolio_attn_concat_trade", True)),
+            portfolio_attn_concat_market=bool(getattr(self._cfg_obj, "portfolio_attn_concat_market", False)),
+            portfolio_attn_mode=str(getattr(self._cfg_obj, "portfolio_attn_mode", "residual")),
+            portfolio_attn_gate_init=float(getattr(self._cfg_obj, "portfolio_attn_gate_init", 0.0) or 0.0),
+            max_portfolio_len=(int(getattr(self._cfg_obj, "max_portfolio_len")) if (getattr(self._cfg_obj, "max_portfolio_len", None) is not None) else None),
         ).to(self.device)
         self.model.load_state_dict(self.state_dict, strict=True)
         self.model.eval()

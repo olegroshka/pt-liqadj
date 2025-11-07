@@ -1,6 +1,6 @@
 # mv_dgt.py
 from __future__ import annotations
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 import torch
 from torch import nn, Tensor
 from ptliq.utils.attn_utils import extract_heads_mean_std, attn_store_update
@@ -23,8 +23,8 @@ def _check_port_ctx(port_ctx: dict):
 def _portfolio_vectors(H: Tensor, port_ctx: dict, l2_normalize: bool = True) -> tuple[Tensor, Tensor]:
     """
     H: (N, D) node embeddings. Returns two (N, D) tensors:
-      - V_abs: average basket intensity vector per node (abs weights)
-      - V_sgn: average basket direction vector per node (signed weights)
+      - V_abs: average portfolio intensity vector per node (abs weights)
+      - V_sgn: average portfolio direction vector per node (signed weights)
     Expects port_ctx with keys: port_nodes_flat, port_w_abs_flat, port_w_signed_flat, port_len.
     """
     _check_port_ctx(port_ctx)
@@ -49,21 +49,21 @@ def _portfolio_vectors(H: Tensor, port_ctx: dict, l2_normalize: bool = True) -> 
     # Gather node embeddings for each line item
     H_lines = H.index_select(0, nodes_flat)  # (L, D)
 
-    # Basket-level sums
+    # portfolio-level sums
     P_abs = torch.zeros(G, D, device=dev, dtype=dt)
     P_abs.index_add_(0, gid, w_abs.unsqueeze(1) * H_lines)
 
     P_sgn = torch.zeros(G, D, device=dev, dtype=dt)
     P_sgn.index_add_(0, gid, w_sgn.unsqueeze(1) * H_lines)
 
-    # Leave-one-out basket vectors per line
+    # Leave-one-out portfolio vectors per line
     P_abs_g = P_abs.index_select(0, gid)  # (L, D)
     P_sgn_g = P_sgn.index_select(0, gid)  # (L, D)
 
     loo_abs = P_abs_g - w_abs.unsqueeze(1) * H_lines
     loo_sgn = P_sgn_g - w_sgn.unsqueeze(1) * H_lines
 
-    # Contribution to the node from each basket membership, weighted by own |w_abs|
+    # Contribution to the node from each portfolio membership, weighted by own |w_abs|
     contrib_abs = w_abs.unsqueeze(1) * loo_abs  # (L, D)
     contrib_sgn = w_abs.unsqueeze(1) * loo_sgn  # (L, D)
 
@@ -110,6 +110,17 @@ class MultiViewDGT(nn.Module):
         view_names: Optional[list[str]] = None,
         use_pf_head: bool = False,
         pf_head_hidden: Optional[int] = None,
+        # portfolio attention (per-portfolio self-/cross-attn)
+        use_portfolio_attn: bool = False,
+        portfolio_attn_layers: int = 1,
+        portfolio_attn_heads: int = 4,
+        portfolio_attn_dropout: Optional[float] = None,
+        portfolio_attn_hidden: Optional[int] = None,
+        portfolio_attn_concat_trade: bool = True,
+        portfolio_attn_concat_market: bool = False,
+        portfolio_attn_mode: str = "residual",  # or "concat"
+        portfolio_attn_gate_init: float = 0.0,
+        max_portfolio_len: Optional[int] = None,
     ): 
         super().__init__()
         if TransformerConv is None:
@@ -120,6 +131,18 @@ class MultiViewDGT(nn.Module):
         self.use_market = use_market and (mkt_dim > 0)
         self.use_pf_head = bool(use_pf_head)
         self.view_names = list(view_names) if (view_names is not None and len(view_names) > 0) else ["struct", "port", "corr_global", "corr_local"]
+
+        # portfolio attention flags/params
+        self.use_portfolio_attn = bool(use_portfolio_attn)
+        self.portfolio_attn_layers = int(portfolio_attn_layers)
+        self.portfolio_attn_heads = int(portfolio_attn_heads)
+        self.portfolio_attn_dropout = float(portfolio_attn_dropout if portfolio_attn_dropout is not None else dropout)
+        self.portfolio_attn_hidden = int(portfolio_attn_hidden) if (portfolio_attn_hidden is not None) else hidden
+        self.portfolio_attn_concat_trade = bool(portfolio_attn_concat_trade)
+        self.portfolio_attn_concat_market = bool(portfolio_attn_concat_market)
+        self.portfolio_attn_mode = str(portfolio_attn_mode)
+        assert self.portfolio_attn_mode in ("residual", "concat"), "portfolio_mode must be 'residual' or 'concat'"
+        self.max_portfolio_len = int(max_portfolio_len) if (max_portfolio_len is not None) else None
 
         # input projection
         self.enc = nn.Sequential(
@@ -176,7 +199,7 @@ class MultiViewDGT(nn.Module):
         self.pf_proj = nn.Linear(2 * hidden, hidden)
         self.pf_gate = nn.Parameter(torch.tensor(0.0))  # start near 0; learnable gate
 
-        # optional portfolio head mlp (per-sample basket embedding)
+        # optional portfolio head mlp (per-sample portfolio embedding)
         pf_h = int(hidden if (pf_head_hidden is None or pf_head_hidden <= 0) else pf_head_hidden)
         if self.use_pf_head:
             self.pf_head_mlp = nn.Sequential(
@@ -189,13 +212,59 @@ class MultiViewDGT(nn.Module):
             self.pf_head_mlp = None
             self.pf_head_gate = None
 
-        # regression head (anchor [+ optional market, trade, pf_head])
+        # portfolio attention encoder (per-portfolio self-/cross-attn)
+        if self.use_portfolio_attn:
+            in_tok = hidden
+            if (self.trade_enc is not None) and self.portfolio_attn_concat_trade:
+                in_tok += hidden
+            if (self.mkt_enc is not None) and self.portfolio_attn_concat_market:
+                in_tok += hidden
+            self.portfolio_proj = nn.Linear(in_tok, self.portfolio_attn_hidden)
+            # Construct Transformer encoder layer. Newer PyTorch versions support
+            # enable_nested_tensor=False to suppress nested-tensor warnings when using
+            # key padding masks. Fall back silently on older versions.
+            try:
+                enc_layer = nn.TransformerEncoderLayer(
+                    d_model=self.portfolio_attn_hidden,
+                    nhead=self.portfolio_attn_heads,
+                    dim_feedforward=4 * self.portfolio_attn_hidden,
+                    dropout=self.portfolio_attn_dropout,
+                    batch_first=True,
+                    norm_first=True,
+                    enable_nested_tensor=False,
+                )
+            except TypeError:
+                enc_layer = nn.TransformerEncoderLayer(
+                    d_model=self.portfolio_attn_hidden,
+                    nhead=self.portfolio_attn_heads,
+                    dim_feedforward=4 * self.portfolio_attn_hidden,
+                    dropout=self.portfolio_attn_dropout,
+                    batch_first=True,
+                    norm_first=True,
+                )
+            # Build encoder; in newer PyTorch versions, pass enable_nested_tensor=False to avoid warnings
+            try:
+                self.portfolio_encoder = nn.TransformerEncoder(enc_layer, num_layers=self.portfolio_attn_layers, enable_nested_tensor=False)
+            except TypeError:
+                self.portfolio_encoder = nn.TransformerEncoder(enc_layer, num_layers=self.portfolio_attn_layers)
+            # fuse contextualized token back to hidden
+            self.portfolio_fuse = nn.Linear(self.portfolio_attn_hidden, hidden)
+            self.portfolio_gate = nn.Parameter(torch.tensor(portfolio_attn_gate_init))
+        else:
+            self.portfolio_proj = None
+            self.portfolio_encoder = None
+            self.portfolio_fuse = None
+            self.portfolio_gate = None
+
+        # regression head (anchor [+ optional market, trade, pf_head, portfolio_ctx])
         in_head = hidden
         if self.use_market:
             in_head += hidden
         if self.trade_enc is not None:
             in_head += hidden
         if self.use_pf_head:
+            in_head += hidden
+        if self.use_portfolio_attn and (self.portfolio_attn_mode == "concat"):
             in_head += hidden
         self.head = nn.Sequential(
             nn.Linear(in_head, hidden),
@@ -284,7 +353,7 @@ class MultiViewDGT(nn.Module):
         port_ctx: Optional[dict] = None,
     ) -> torch.Tensor:
         """Compatibility helper (legacy API): per-sample weighted portfolio sum.
-        Returns [B, D] vectors using signed weights over the basket indicated by pf_gid.
+        Returns [B, D] vectors using signed weights over the portfolio indicated by pf_gid.
         If gid < 0 or context is disabled/absent, returns zeros for that sample.
         This method is not used in the main forward pass anymore; kept for tests/backward-compat.
         Expects port_ctx to provide at least: port_nodes_flat, port_w_signed_flat, port_len.
@@ -396,14 +465,147 @@ class MultiViewDGT(nn.Module):
         if z_trade is not None:
             z_list.append(z_trade)
 
+        # 4) portfolio self-/cross-attention over items within each portfolio
+        z_anchor_prev = z_anchor
+        z_anchor, z_portfolio_ctx = self.calc_attention_scores(pf_gid, z_anchor, z_mkt, z_trade)
+
+        # Ensure head uses updated z_anchor when portfolio residual applied
+        z_list[0] = z_anchor
+
+        # Track portfolio delta norm for observability
+        portfolio_delta_norm = (z_anchor - z_anchor_prev).norm(dim=1).mean() if self.use_portfolio_attn else None
+
         add_pf, aux, z_pf_feat = self._compute_pf_head(h2, pf_gid, port_ctx, return_aux)
         if add_pf:
             z_list.extend(add_pf)
-        # 4) Keep head input width constant if pf head enabled but unavailable
+        # 5) Keep head input width constant if pf head enabled but unavailable
         self._append_pf_placeholder_if_needed(z_list, h2, anchor_idx, z_pf_feat)
+
+        if (self.use_portfolio_attn and (self.portfolio_attn_mode == "concat") and (z_portfolio_ctx is not None)):
+            z_list.append(z_portfolio_ctx)
 
         z = torch.cat(z_list, dim=1)
         yhat = self.head(z).squeeze(-1)
         if return_aux:
+            if self.use_portfolio_attn:
+                aux["portfolio_gate"] = torch.sigmoid(self.portfolio_gate).detach().item() if (self.portfolio_gate is not None) else 0.0
+                if portfolio_delta_norm is not None:
+                    try:
+                        aux["portfolio_delta_norm"] = float(portfolio_delta_norm.detach().item())
+                    except Exception:
+                        pass
             return yhat, aux
         return yhat
+
+    def calc_attention_scores(self, 
+                              pf_gid: Tensor | None,
+                              z_anchor: Tensor, 
+                              z_mkt: Tensor | None, 
+                              z_trade: Tensor | None) -> \
+    tuple[Tensor | Any, Tensor | None]:
+        z_portfolio_ctx: Optional[torch.Tensor] = None
+        if self.use_portfolio_attn and (pf_gid is not None):
+            B = z_anchor.size(0)
+            device = z_anchor.device
+            dtype = z_anchor.dtype
+            # valid samples are those with gid >= 0
+            gid = pf_gid.view(-1).long()
+            valid_mask = gid >= 0
+            if valid_mask.any():
+                # Optionally cap extremely large portfolios by top-|weight| selection at scorer side; here we just guard memory
+                # Build token features to feed encoder
+                toks: list[torch.Tensor] = [z_anchor]
+                if (z_trade is not None) and self.portfolio_attn_concat_trade:
+                    toks.append(z_trade)
+                if (z_mkt is not None) and self.portfolio_attn_concat_market:
+                    toks.append(z_mkt)
+                tok = torch.cat(toks, dim=1) if len(toks) > 1 else toks[0]
+                tok = self.portfolio_proj(tok)  # [B, Hb]
+
+                # Sort by gid to make groups contiguous
+                order = torch.argsort(gid)
+                gid_sorted = gid.index_select(0, order)
+                tok_sorted = tok.index_select(0, order)
+                valid_sorted = valid_mask.index_select(0, order)
+
+                # Compute group lengths (only for valid gids)
+                # Identify segment boundaries where gid changes, excluding invalid entries
+                valid_idx = torch.nonzero(valid_sorted, as_tuple=False).view(-1)
+                tok_valid = tok_sorted.index_select(0, valid_idx)
+                gid_valid = gid_sorted.index_select(0, valid_idx)
+                if gid_valid.numel() > 0:
+                    # bincount up to max gid + 1
+                    G = int(gid_valid.max().item()) + 1
+                    lens = torch.bincount(gid_valid, minlength=G)
+                    # Remove empty groups that might exist between 0..max
+                    nonzero_groups = torch.nonzero(lens > 0, as_tuple=False).view(-1)
+                    G_eff = int(nonzero_groups.numel())
+                    # Map original gid → compact 0..G_eff-1
+                    gid_compact = torch.zeros(G, dtype=torch.long, device=device)
+                    gid_compact.index_copy_(0, nonzero_groups, torch.arange(G_eff, device=device))
+                    gid_comp = gid_compact.index_select(0, gid_valid)
+                    # Reorder by compact gid to assemble portfolios contiguously (optional stability)
+                    ord2 = torch.argsort(gid_comp)
+                    tok_valid2 = tok_valid.index_select(0, ord2)
+                    gid_comp2 = gid_comp.index_select(0, ord2)
+                    # Recompute lengths per compact id
+                    lens2 = torch.bincount(gid_comp2, minlength=G_eff)
+                    Lmax = int(lens2.max().item()) if G_eff > 0 else 0
+
+                    # Cap portfolio length if configured
+                    if (self.max_portfolio_len is not None) and (Lmax > self.max_portfolio_len):
+                        Lmax = int(self.max_portfolio_len)
+
+                    # Pad into [G_eff, Lmax, Hb]
+                    Hb = tok_valid2.size(1)
+                    pad_tok = torch.zeros((G_eff, Lmax, Hb), device=device, dtype=dtype)
+                    pad_mask = torch.ones((G_eff, Lmax), device=device, dtype=torch.bool)  # True=pad
+                    start = 0
+                    for g_idx in range(G_eff):
+                        Lg = int(lens2[g_idx].item())
+                        if Lg == 0:
+                            continue
+                        end = start + Lg
+                        Luse = min(Lg, Lmax)
+                        pad_tok[g_idx, :Luse, :] = tok_valid2[start:start + Luse, :]
+                        pad_mask[g_idx, :Luse] = False
+                        start = end
+
+                    # Early exit: if all L<=1, skip fusion entirely to behave like identity (singleton stability)
+                    all_singletons = bool((lens2 <= 1).all().item()) if lens2.numel() > 0 else True
+                    if all_singletons:
+                        # Do not change z_anchor; no portfolio fusion applied
+                        tok_ctx_full = None
+                    else:
+                        tok_ctx = self.portfolio_encoder(pad_tok, src_key_padding_mask=pad_mask)
+                        # Unpad back to flat valid order
+                        ctx_list = []
+                        for g_idx in range(G_eff):
+                            Lg = int(lens2[g_idx].item())
+                            if Lg == 0:
+                                continue
+                            Luse = min(Lg, Lmax)
+                            ctx_list.append(tok_ctx[g_idx, :Luse, :])
+                        tok_ctx_valid = torch.cat(ctx_list, dim=0) if ctx_list else tok_valid2
+
+                        # Restore to original B order
+                        # First invert ord2 within valid, then scatter back into B with zeros for invalid
+                        inv_ord2 = torch.empty_like(ord2)
+                        inv_ord2[ord2] = torch.arange(ord2.numel(), device=device)
+                        tok_ctx_valid_back = tok_ctx_valid.index_select(0, inv_ord2)
+                        tok_ctx_sorted = torch.zeros_like(tok_sorted)
+                        tok_ctx_sorted.index_copy_(0, valid_idx, tok_ctx_valid_back)
+                        inv_order = torch.empty_like(order)
+                        inv_order[order] = torch.arange(B, device=device)
+                        tok_ctx_full = tok_ctx_sorted.index_select(0, inv_order)
+
+                    # Fuse to hidden dim and gate (only if context was computed)
+                    if tok_ctx_full is not None:
+                        z_ctx_h = self.portfolio_fuse(tok_ctx_full)
+                        gamma = torch.sigmoid(self.portfolio_gate) if self.portfolio_gate is not None else 1.0
+                        if self.portfolio_attn_mode == "residual":
+                            z_anchor = z_anchor + gamma * z_ctx_h
+                        else:  # concat
+                            z_portfolio_ctx = gamma * z_ctx_h
+                # else: no valid gids; skip
+        return z_anchor, z_portfolio_ctx

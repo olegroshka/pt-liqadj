@@ -39,6 +39,17 @@ class MVDGTModelConfig:
     # optional per-sample portfolio head
     use_pf_head: bool = False
     pf_head_hidden: Optional[int] = None
+    # portfolio self-/cross-attention over request line items
+    use_portfolio_attn: bool = False
+    portfolio_attn_layers: int = 1
+    portfolio_attn_heads: int = 4
+    portfolio_attn_dropout: Optional[float] = None
+    portfolio_attn_hidden: Optional[int] = None
+    portfolio_attn_concat_trade: bool = True
+    portfolio_attn_concat_market: bool = False
+    portfolio_attn_mode: str = "residual"  # or "concat"
+    portfolio_attn_gate_init: float = 0.0
+    max_portfolio_len: Optional[int] = None
     # runtime-computed fields persisted for exact reconstruction at inference time
     x_dim: Optional[int] = None
     mkt_dim: Optional[int] = None
@@ -204,6 +215,17 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
         view_names=list(cfg.model.views),
         use_pf_head=bool(getattr(cfg.model, "use_pf_head", False)),
         pf_head_hidden=getattr(cfg.model, "pf_head_hidden", None),
+        # basket attention wiring
+        use_portfolio_attn=bool(getattr(cfg.model, "use_portfolio_attn", False)),
+        portfolio_attn_layers=int(getattr(cfg.model, "portfolio_attn_layers", 1) or 1),
+        portfolio_attn_heads=int(getattr(cfg.model, "portfolio_attn_heads", 4) or 4),
+        portfolio_attn_dropout=float(getattr(cfg.model, "portfolio_attn_dropout", cfg.model.dropout if cfg.model.dropout is not None else 0.1) or 0.1),
+        portfolio_attn_hidden=(int(cfg.model.portfolio_attn_hidden) if (getattr(cfg.model, "portfolio_attn_hidden", None) is not None) else None),
+        portfolio_attn_concat_trade=bool(getattr(cfg.model, "portfolio_attn_concat_trade", True)),
+        portfolio_attn_concat_market=bool(getattr(cfg.model, "portfolio_attn_concat_market", False)),
+        portfolio_attn_mode=str(getattr(cfg.model, "portfolio_attn_mode", "residual")),
+        portfolio_attn_gate_init=float(getattr(cfg.model, "portfolio_attn_gate_init", 0.0) or 0.0),
+        max_portfolio_len=(int(cfg.model.max_portfolio_len) if (getattr(cfg.model, "max_portfolio_len", None) is not None) else None),
     ).to(device)
 
     # --- runtime sanity prints for correlation gate and edge counts (centralized)

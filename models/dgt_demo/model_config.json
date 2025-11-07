@@ -1,6 +1,6 @@
 {
-  "hidden": 128,
-  "heads": 2,
+  "hidden": 192,
+  "heads": 4,
   "dropout": 0.1,
   "trade_dim": 2,
   "use_portfolio": true,
@@ -11,7 +11,17 @@
     "corr_local"
   ],
   "use_pf_head": true,
-  "pf_head_hidden": null,
+  "pf_head_hidden": 128,
+  "use_portfolio_attn": true,
+  "portfolio_attn_layers": 1,
+  "portfolio_attn_heads": 4,
+  "portfolio_attn_dropout": null,
+  "portfolio_attn_hidden": null,
+  "portfolio_attn_concat_trade": true,
+  "portfolio_attn_concat_market": false,
+  "portfolio_attn_mode": "residual",
+  "portfolio_attn_gate_init": 0.0,
+  "max_portfolio_len": null,
   "x_dim": 14,
   "mkt_dim": 14,
   "use_market": true

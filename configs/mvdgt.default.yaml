@@ -54,7 +54,7 @@ data:
       epochs: 5                    # total epochs; for 12M rows start with 3–8 and monitor val RMSE
       lr: 0.001                    # base LR; OneCycle in trainer ramps this; 3e-4 for cosine is also good
       weight_decay: 0.0001         # L2 regularization; 1e-4–3e-4 typical; increase if overfitting
-      batch_size: 512              # per-step batch (no grad accumulation here); set by VRAM: 8k–16k on 48GB
+      batch_size: 2048             # per-step batch (no grad accumulation here); set by VRAM: 8k–16k on 48GB
       seed: 17                     # RNG seed for reproducibility
       # Logging/monitoring
       enable_tb: true              # enable TensorBoard logging
@@ -69,16 +69,32 @@ data:
       portfolio_jitter_std: 0.05   # std for optional portfolio size jitter in augments (future use)
 
     model:
-      hidden: 128                  # main hidden size (node/heads). 128–192 for ~12M rows on GPU; 64–96 on CPU
-      heads: 2                     # attention heads per TransformerConv; 2–4 typical; >4 rarely helps
+      hidden: 192                  # main hidden size (node/heads). 128–192 for ~12M rows on GPU; 64–96 on CPU
+      heads: 4                     # attention heads per TransformerConv; 2–4 typical; >4 rarely helps
       dropout: 0.10                # dropout in encoders/head; 0.1–0.2 recommended at scale
       trade_dim: 2                 # number of trade features in scorer (side_sign, log_size). Keep 2 unless you add features
       use_portfolio: true          # enable portfolio residual fusion over node embeddings (uses port_ctx)
       # Per‑sample portfolio head (concatenates basket vector at head; improves basket sensitivity)
       use_pf_head: true            # enable portfolio head; requires training with this flag to be effective
-      pf_head_hidden: null         # hidden width for pf head MLP; null→use `hidden`; reduce if memory bound
+      pf_head_hidden: 128          # hidden width for pf head MLP; set to `hidden` by default; reduce if memory bound
       # Graph view names used by the model. Order must match masks in view_masks.pt
       views: [struct, port, corr_global, corr_local]  # drop 'corr_local' if memory constrained
+
+      # Basket self-/cross-attention over request line items (per-portfolio only)
+      # When enabled, the model will contextualize each line item with the rest of its basket via a compact Transformer.
+      # This makes scores sensitive to portfolio composition (permutation-invariant within a portfolio; isolated across portfolios).
+      # Defaults are conservative and suitable for 200–1000 line items per portfolio.
+      use_portfolio_attn: true             # turn ON to enable basket self-/cross-attention; requires training with this flag
+      portfolio_attn_layers: 1             # number of Transformer encoder layers over basket tokens; 1–2 recommended
+      portfolio_attn_heads: 4              # attention heads inside basket encoder; 4 is a good default
+      portfolio_attn_dropout: null         # dropout inside basket encoder; null→fallback to `dropout` above (typ. 0.10)
+      portfolio_attn_hidden: null          # internal token dim for basket encoder; null→use `hidden`; reduce if VRAM is tight
+      portfolio_attn_concat_trade: true    # include per-trade features (side_sign, log_size) in basket tokens for attention
+      portfolio_attn_concat_market: false  # include market features in basket tokens (usually false; market also goes to head)
+      portfolio_attn_mode: residual        # how to fuse basket context back: 'residual' adds a gated residual; 'concat' appends to head
+      portfolio_attn_gate_init: 0.0        # logit init for the basket gate; 0.0→sigmoid(0)=0.5. Set negative (e.g., -2..-5) for safer warm-up
+      max_portfolio_len: null              # optional cap per-portfolio length for attention; set 512/1024 for very large baskets
+
       # Runtime‑computed/inferred fields (persisted for exact reconstruction at inference). Usually leave as null.
       x_dim: null                  # inferred from PyG node features at runtime; set only for debugging
       mkt_dim: null                # inferred from market context rows; set to 0 to disable market entirely
