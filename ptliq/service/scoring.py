@@ -198,6 +198,82 @@ def _to_date(x: Any):
     except Exception:
         return None
 
+# --- Runtime portfolio context helpers (permutation-invariant) ---
+from collections import defaultdict
+
+def _normalize_weights(abs_weights: np.ndarray) -> np.ndarray:
+    s = float(np.sum(abs_weights))
+    if s <= 0.0 or not np.isfinite(s):
+        n = int(abs_weights.size)
+        return np.full(n, 1.0 / max(1, n), dtype=np.float32)
+    return (abs_weights / s).astype(np.float32)
+
+
+def _build_runtime_port_ctx(
+    rows: List[Dict[str, Any]],
+    node_ids: List[int],
+    device: torch.device,
+) -> tuple[Optional[dict], Optional[torch.Tensor]]:
+    """
+    Build per-request portfolio context from `portfolio_id`.
+    Returns (port_ctx, pf_gid_tensor) if any portfolio_id is present; else (None, None).
+    Weights are permutation-invariant, depending only on (isin, side, size):
+      - abs weight ∝ abs(size)
+      - signed weight ∝ side_sign * abs(size)
+      - both normalized within the portfolio to sum(abs)=1
+    """
+    groups: dict[Any, list[tuple[int, int, float, float]]] = defaultdict(list)
+    any_pid = False
+    for i, r in enumerate(rows):
+        pid = r.get("portfolio_id")
+        if pid is None:
+            continue
+        any_pid = True
+        side = _side_sign(r.get("side"))
+        try:
+            sz = float(r.get("size", 0.0))
+        except Exception:
+            sz = 0.0
+        a = abs(sz)
+        s = (1.0 if side >= 0 else -1.0) * a
+        groups[pid].append((i, int(node_ids[i]), a, s))
+
+    if not any_pid:
+        return None, None
+
+    # stable order by first occurrence in dict iteration
+    ordered = list(groups.items())
+
+    port_nodes: list[int] = []
+    port_w_abs: list[float] = []
+    port_w_sgn: list[float] = []
+    port_len: list[int] = []
+    pf_gid = np.full(len(rows), -1, dtype=np.int64)
+
+    for g_idx, (_pid, items) in enumerate(ordered):
+        abs_vec = np.array([a for (_, _, a, _) in items], dtype=np.float32)
+        sgn_vec = np.array([s for (_, _, _, s) in items], dtype=np.float32)
+        w_abs = _normalize_weights(abs_vec)
+        denom = float(abs_vec.sum())
+        if denom <= 0.0 or not np.isfinite(denom):
+            denom = float(len(items)) if len(items) > 0 else 1.0
+        w_sgn = (sgn_vec / denom).astype(np.float32)
+        port_len.append(len(items))
+        for (row_idx, nid, _a, _s), wA, wS in zip(items, w_abs, w_sgn):
+            port_nodes.append(nid)
+            port_w_abs.append(float(wA))
+            port_w_sgn.append(float(wS))
+            pf_gid[row_idx] = g_idx
+
+    port_ctx = {
+        "port_nodes_flat": torch.tensor(port_nodes, dtype=torch.long, device=device),
+        "port_w_abs_flat": torch.tensor(port_w_abs, dtype=torch.float32, device=device),
+        "port_w_signed_flat": torch.tensor(port_w_sgn, dtype=torch.float32, device=device),
+        "port_len": torch.tensor(port_len, dtype=torch.long, device=device),
+    }
+    pf_gid_t = torch.tensor(pf_gid, dtype=torch.long, device=device)
+    return port_ctx, pf_gid_t
+
 
 class _FeatBundle:
     def __init__(self, feature_names: List[str]):
@@ -425,6 +501,8 @@ class DGTScorer:
             use_market=bool(self._cfg_obj.use_market),
             trade_dim=int(self._cfg_obj.trade_dim),
             view_names=list(getattr(self._cfg_obj, "views", ["struct","port","corr_global","corr_local"])),
+            use_pf_head=bool(getattr(self._cfg_obj, "use_pf_head", False)),
+            pf_head_hidden=getattr(self._cfg_obj, "pf_head_hidden", None),
         ).to(self.device)
         self.model.load_state_dict(self.state_dict, strict=True)
         self.model.eval()
@@ -492,27 +570,35 @@ class DGTScorer:
             di = torch.as_tensor(idxs, dtype=torch.long, device=self.device)
             market_feat = self.mkt_ctx["mkt_feat"].index_select(0, di)
 
-        # --- pf_gid: prefer explicit in request; else derive from training port_ctx; else -1
-        pf_list: List[int] = []
+        # --- Portfolio context & pf_gid selection (runtime > explicit > training-derived)
         any_explicit = any(("pf_gid" in r) and (r["pf_gid"] is not None) for r in rows)
-        if any_explicit:
+        runtime_port_ctx, runtime_pf_gid = _build_runtime_port_ctx(rows, node_ids, self.device)
+        if (runtime_port_ctx is not None) and (not any_explicit):
+            port_ctx = runtime_port_ctx
+            pf_gid = runtime_pf_gid
+        elif any_explicit:
+            pf_list: List[int] = []
             for r in rows:
                 v = r.get("pf_gid", -1)
                 try:
                     pf_list.append(int(v))
                 except Exception:
                     pf_list.append(-1)
+            pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
+            port_ctx = self.port_ctx
         else:
+            pf_list: List[int] = []
             for nid in node_ids:
                 pf_list.append(int(self._node_to_pfgid.get(int(nid), -1)))
-        pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
+            pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
+            port_ctx = self.port_ctx
 
         yhat = self.model(
             self.x,
             anchor_idx=anchor_idx,
             market_feat=market_feat,
             pf_gid=pf_gid,
-            port_ctx=self.port_ctx,
+            port_ctx=port_ctx,
             trade_feat=trade,
         )
         y = yhat.detach().cpu().numpy().astype(np.float32)

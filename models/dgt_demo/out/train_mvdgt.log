@@ -1,95 +1,162 @@
-2025-11-05 15:44:59 | INFO | training_config={"workdir": "data/mvdgt/exp001", "pyg_dir": "data/pyg", "outdir": "models/dgt0", "epochs": 20, "lr": 0.001, "weight_decay": 0.0001, "batch_size": 1024, "seed": 17, "device": "cuda", "enable_tb": true, "tb_log_dir": "models/dgt0/tb", "enable_tqdm": true, "log_every": 50, "enable_attn_tb": false, "attn_log_every": 200, "model": {"hidden": 128, "heads": 2, "dropout": 0.1, "trade_dim": 2, "use_portfolio": true, "views": ["struct", "port", "corr_global", "corr_local"], "x_dim": null, "mkt_dim": null, "use_market": null}}
-2025-11-05 15:44:59 | INFO | market_context: available | mkt_feat shape=(90, 14) dtype=torch.float32 device=cuda:0
-2025-11-05 15:44:59 | INFO | market_context: mean=8.611089 std=24.718622
-2025-11-05 15:44:59 | INFO | portfolio_context: available | groups=170 line_items=1700 avg_len=10.00 min_len=10 max_len=10
-2025-11-05 15:45:00 | INFO | corr_gate = 0.268941
-2025-11-05 15:45:00 | INFO | num struct      edges = 64688
-2025-11-05 15:45:00 | INFO | num port        edges = 3956
-2025-11-05 15:45:00 | INFO | num corr_global edges = 25828
-2025-11-05 15:45:00 | INFO | num corr_local  edges = 24266
-2025-11-05 15:45:00 | INFO | epoch 001 train_mae=31.5634 train_rmse=34.0812 val_mae=25.3552 val_rmse=28.2070
-2025-11-05 15:45:01 | INFO | epoch 002 train_mae=16.9492 train_rmse=20.5992 val_mae=17.5276 val_rmse=20.8101
-2025-11-05 15:45:02 | INFO | epoch 003 train_mae=11.1373 train_rmse=13.8647 val_mae=10.2186 val_rmse=12.5598
-2025-11-05 15:45:02 | INFO | epoch 004 train_mae=7.3367 train_rmse=9.2713 val_mae=5.4487 val_rmse=6.7096
-2025-11-05 15:45:03 | INFO | epoch 005 train_mae=4.4506 train_rmse=5.5878 val_mae=4.3437 val_rmse=5.3491
-2025-11-05 15:45:03 | INFO | epoch 006 train_mae=4.0038 train_rmse=5.0361 val_mae=4.9437 val_rmse=5.9922
-2025-11-05 15:45:04 | INFO | epoch 007 train_mae=3.9659 train_rmse=4.9900 val_mae=4.1756 val_rmse=5.1640
-2025-11-05 15:45:04 | INFO | epoch 008 train_mae=3.9258 train_rmse=4.9218 val_mae=4.2971 val_rmse=5.2951
-2025-11-05 15:45:05 | INFO | epoch 009 train_mae=3.8502 train_rmse=4.8351 val_mae=3.9513 val_rmse=4.9038
-2025-11-05 15:45:06 | INFO | epoch 010 train_mae=3.8239 train_rmse=4.8003 val_mae=4.0629 val_rmse=5.0338
-2025-11-05 15:45:06 | INFO | epoch 011 train_mae=3.8341 train_rmse=4.8089 val_mae=3.9248 val_rmse=4.8738
-2025-11-05 15:45:07 | INFO | epoch 012 train_mae=3.7831 train_rmse=4.7742 val_mae=3.9989 val_rmse=4.9559
-2025-11-05 15:45:07 | INFO | epoch 013 train_mae=3.7858 train_rmse=4.7753 val_mae=3.9496 val_rmse=4.8987
-2025-11-05 15:45:08 | INFO | epoch 014 train_mae=3.7971 train_rmse=4.7657 val_mae=3.8942 val_rmse=4.8355
-2025-11-05 15:45:08 | INFO | epoch 015 train_mae=3.7627 train_rmse=4.7360 val_mae=3.8182 val_rmse=4.7460
-2025-11-05 15:45:09 | INFO | epoch 016 train_mae=3.7443 train_rmse=4.7131 val_mae=4.0482 val_rmse=5.0108
-2025-11-05 15:45:09 | INFO | epoch 017 train_mae=3.7515 train_rmse=4.7279 val_mae=3.8738 val_rmse=4.8098
-2025-11-05 15:45:10 | INFO | epoch 018 train_mae=3.7941 train_rmse=4.7635 val_mae=3.8760 val_rmse=4.8124
-2025-11-05 15:45:11 | INFO | epoch 019 train_mae=3.7398 train_rmse=4.6989 val_mae=3.9305 val_rmse=4.8758
-2025-11-05 15:45:11 | INFO | epoch 020 train_mae=3.7653 train_rmse=4.7293 val_mae=3.9363 val_rmse=4.8825
-2025-11-05 15:45:11 | INFO | [TEST] RMSE = 4.2326 | MAE = 3.3921 | MSE = 17.9151
-2025-11-05 15:45:11 | INFO | [OK] wrote models/dgt0/ckpt.pt
-2025-11-05 16:00:24 | INFO | training_config={"workdir": "data/mvdgt/exp001", "pyg_dir": "data/pyg", "outdir": "models/dgt0", "epochs": 20, "lr": 0.001, "weight_decay": 0.0001, "batch_size": 1024, "seed": 17, "device": "cuda", "enable_tb": true, "tb_log_dir": "models/dgt0/tb", "enable_tqdm": true, "log_every": 50, "enable_attn_tb": false, "attn_log_every": 200, "model": {"hidden": 128, "heads": 2, "dropout": 0.1, "trade_dim": 2, "use_portfolio": true, "views": ["struct", "port", "corr_global", "corr_local"], "x_dim": null, "mkt_dim": null, "use_market": null}}
-2025-11-05 16:00:24 | INFO | market_context: available | mkt_feat shape=(90, 14) dtype=torch.float32 device=cuda:0
-2025-11-05 16:00:24 | INFO | market_context: mean=8.611089 std=24.718622
-2025-11-05 16:00:24 | INFO | portfolio_context: available | groups=170 line_items=1700 avg_len=10.00 min_len=10 max_len=10
-2025-11-05 16:00:24 | INFO | corr_gate = 0.268941
-2025-11-05 16:00:24 | INFO | num struct      edges = 64688
-2025-11-05 16:00:24 | INFO | num port        edges = 3956
-2025-11-05 16:00:24 | INFO | num corr_global edges = 25828
-2025-11-05 16:00:24 | INFO | num corr_local  edges = 24266
-2025-11-05 16:00:25 | INFO | epoch 001 train_mae=31.5634 train_rmse=34.0812 val_mae=25.3552 val_rmse=28.2070
-2025-11-05 16:00:26 | INFO | epoch 002 train_mae=16.9492 train_rmse=20.5992 val_mae=17.5276 val_rmse=20.8101
-2025-11-05 16:00:26 | INFO | epoch 003 train_mae=11.1373 train_rmse=13.8647 val_mae=10.2186 val_rmse=12.5598
-2025-11-05 16:00:27 | INFO | epoch 004 train_mae=7.3367 train_rmse=9.2713 val_mae=5.4487 val_rmse=6.7096
-2025-11-05 16:00:27 | INFO | epoch 005 train_mae=4.4506 train_rmse=5.5878 val_mae=4.3437 val_rmse=5.3491
-2025-11-05 16:00:28 | INFO | epoch 006 train_mae=4.0038 train_rmse=5.0361 val_mae=4.9437 val_rmse=5.9922
-2025-11-05 16:00:28 | INFO | epoch 007 train_mae=3.9659 train_rmse=4.9900 val_mae=4.1756 val_rmse=5.1640
-2025-11-05 16:00:29 | INFO | epoch 008 train_mae=3.9258 train_rmse=4.9218 val_mae=4.2971 val_rmse=5.2951
-2025-11-05 16:00:29 | INFO | epoch 009 train_mae=3.8502 train_rmse=4.8351 val_mae=3.9513 val_rmse=4.9038
-2025-11-05 16:00:30 | INFO | epoch 010 train_mae=3.8239 train_rmse=4.8003 val_mae=4.0629 val_rmse=5.0338
-2025-11-05 16:00:30 | INFO | epoch 011 train_mae=3.8341 train_rmse=4.8089 val_mae=3.9248 val_rmse=4.8738
-2025-11-05 16:00:31 | INFO | epoch 012 train_mae=3.7831 train_rmse=4.7742 val_mae=3.9989 val_rmse=4.9559
-2025-11-05 16:00:32 | INFO | epoch 013 train_mae=3.7858 train_rmse=4.7753 val_mae=3.9496 val_rmse=4.8987
-2025-11-05 16:00:32 | INFO | epoch 014 train_mae=3.7971 train_rmse=4.7657 val_mae=3.8942 val_rmse=4.8355
-2025-11-05 16:00:33 | INFO | epoch 015 train_mae=3.7627 train_rmse=4.7360 val_mae=3.8182 val_rmse=4.7460
-2025-11-05 16:00:33 | INFO | epoch 016 train_mae=3.7443 train_rmse=4.7131 val_mae=4.0482 val_rmse=5.0108
-2025-11-05 16:00:34 | INFO | epoch 017 train_mae=3.7515 train_rmse=4.7279 val_mae=3.8738 val_rmse=4.8098
-2025-11-05 16:00:34 | INFO | epoch 018 train_mae=3.7941 train_rmse=4.7635 val_mae=3.8760 val_rmse=4.8124
-2025-11-05 16:00:35 | INFO | epoch 019 train_mae=3.7398 train_rmse=4.6989 val_mae=3.9305 val_rmse=4.8758
-2025-11-05 16:00:35 | INFO | epoch 020 train_mae=3.7653 train_rmse=4.7293 val_mae=3.9363 val_rmse=4.8825
-2025-11-05 16:00:35 | INFO | [TEST] RMSE = 4.2326 | MAE = 3.3921 | MSE = 17.9151
-2025-11-05 16:00:35 | INFO | [OK] wrote models/dgt0/ckpt.pt
-2025-11-05 20:44:12 | INFO | training_config={"workdir": "data/mvdgt/exp001", "pyg_dir": "data/pyg", "outdir": "models/dgt0", "epochs": 20, "lr": 0.001, "weight_decay": 0.0001, "batch_size": 1024, "seed": 17, "device": "cuda", "enable_tb": true, "tb_log_dir": "models/dgt0/tb", "enable_tqdm": true, "log_every": 50, "enable_attn_tb": false, "attn_log_every": 200, "model": {"hidden": 128, "heads": 2, "dropout": 0.1, "trade_dim": 2, "use_portfolio": true, "views": ["struct", "port", "corr_global", "corr_local"], "x_dim": null, "mkt_dim": null, "use_market": null}}
-2025-11-05 20:44:12 | INFO | market_context: available | mkt_feat shape=(90, 14) dtype=torch.float32 device=cuda:0
-2025-11-05 20:44:12 | INFO | market_context: mean=8.611089 std=24.718622
-2025-11-05 20:44:12 | INFO | portfolio_context: available | groups=170 line_items=1700 avg_len=10.00 min_len=10 max_len=10
-2025-11-05 20:44:12 | INFO | copied samples.parquet to outdir: models/dgt0/samples.parquet
-2025-11-05 20:44:12 | WARNING | market preproc computation failed: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument index in method wrapper_CUDA__index_select)
-2025-11-05 20:44:12 | INFO | corr_gate = 0.268941
-2025-11-05 20:44:12 | INFO | num struct      edges = 64688
-2025-11-05 20:44:12 | INFO | num port        edges = 3956
-2025-11-05 20:44:12 | INFO | num corr_global edges = 25828
-2025-11-05 20:44:12 | INFO | num corr_local  edges = 24266
-2025-11-05 20:44:13 | INFO | epoch 001 train_mae=31.5634 train_rmse=34.0812 val_mae=25.3552 val_rmse=28.2070
-2025-11-05 20:44:14 | INFO | epoch 002 train_mae=16.9492 train_rmse=20.5992 val_mae=17.5276 val_rmse=20.8101
-2025-11-05 20:44:14 | INFO | epoch 003 train_mae=11.1373 train_rmse=13.8647 val_mae=10.2186 val_rmse=12.5598
-2025-11-05 20:44:15 | INFO | epoch 004 train_mae=7.3367 train_rmse=9.2713 val_mae=5.4487 val_rmse=6.7096
-2025-11-05 20:44:15 | INFO | epoch 005 train_mae=4.4506 train_rmse=5.5878 val_mae=4.3437 val_rmse=5.3491
-2025-11-05 20:44:16 | INFO | epoch 006 train_mae=4.0038 train_rmse=5.0361 val_mae=4.9437 val_rmse=5.9922
-2025-11-05 20:44:16 | INFO | epoch 007 train_mae=3.9659 train_rmse=4.9900 val_mae=4.1756 val_rmse=5.1640
-2025-11-05 20:44:17 | INFO | epoch 008 train_mae=3.9258 train_rmse=4.9218 val_mae=4.2971 val_rmse=5.2951
-2025-11-05 20:44:17 | INFO | epoch 009 train_mae=3.8502 train_rmse=4.8351 val_mae=3.9513 val_rmse=4.9038
-2025-11-05 20:44:18 | INFO | epoch 010 train_mae=3.8239 train_rmse=4.8003 val_mae=4.0629 val_rmse=5.0338
-2025-11-05 20:44:18 | INFO | epoch 011 train_mae=3.8341 train_rmse=4.8089 val_mae=3.9248 val_rmse=4.8738
-2025-11-05 20:44:19 | INFO | epoch 012 train_mae=3.7831 train_rmse=4.7742 val_mae=3.9989 val_rmse=4.9559
-2025-11-05 20:44:19 | INFO | epoch 013 train_mae=3.7858 train_rmse=4.7753 val_mae=3.9496 val_rmse=4.8987
-2025-11-05 20:44:20 | INFO | epoch 014 train_mae=3.7971 train_rmse=4.7657 val_mae=3.8942 val_rmse=4.8355
-2025-11-05 20:44:20 | INFO | epoch 015 train_mae=3.7627 train_rmse=4.7360 val_mae=3.8182 val_rmse=4.7460
-2025-11-05 20:44:21 | INFO | epoch 016 train_mae=3.7443 train_rmse=4.7131 val_mae=4.0482 val_rmse=5.0108
-2025-11-05 20:44:21 | INFO | epoch 017 train_mae=3.7515 train_rmse=4.7279 val_mae=3.8738 val_rmse=4.8098
-2025-11-05 20:44:22 | INFO | epoch 018 train_mae=3.7941 train_rmse=4.7635 val_mae=3.8760 val_rmse=4.8124
-2025-11-05 20:44:22 | INFO | epoch 019 train_mae=3.7398 train_rmse=4.6989 val_mae=3.9305 val_rmse=4.8758
-2025-11-05 20:44:23 | INFO | epoch 020 train_mae=3.7653 train_rmse=4.7293 val_mae=3.9363 val_rmse=4.8825
-2025-11-05 20:44:23 | INFO | [TEST] RMSE = 4.2326 | MAE = 3.3921 | MSE = 17.9151
-2025-11-05 20:44:23 | INFO | [OK] wrote models/dgt0/ckpt.pt
+2025-11-06 22:20:21 | INFO | training_config={"workdir": "data/mvdgt/exp001", "pyg_dir": "data/pyg", "outdir": "models/dgt5", "epochs": 20, "lr": 0.001, "weight_decay": 0.0001, "batch_size": 1024, "seed": 17, "device": "cuda", "enable_tb": true, "tb_log_dir": "models/dgt5/tb", "enable_tqdm": true, "log_every": 50, "enable_attn_tb": false, "attn_log_every": 200, "portfolio_sim_weight": 0.0, "portfolio_jitter_std": 0.05, "model": {"hidden": 128, "heads": 2, "dropout": 0.1, "trade_dim": 2, "use_portfolio": true, "views": ["struct", "port", "corr_global", "corr_local"], "use_pf_head": false, "pf_head_hidden": null, "x_dim": null, "mkt_dim": null, "use_market": null}}
+2025-11-06 22:20:21 | INFO | market_context: available | mkt_feat shape=(90, 14) dtype=torch.float32 device=cuda:0
+2025-11-06 22:20:21 | INFO | market_context: mean=8.611089 std=24.718622
+2025-11-06 22:20:21 | INFO | portfolio_context: available | groups=170 line_items=1700 avg_len=10.00 min_len=10 max_len=10
+2025-11-06 22:20:21 | INFO | copied samples.parquet to outdir: models/dgt5/samples.parquet
+2025-11-06 22:20:21 | WARNING | market preproc computation failed: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument index in method wrapper_CUDA__index_select)
+2025-11-06 22:20:21 | INFO | corr_gate = 0.268941
+2025-11-06 22:20:21 | INFO | num struct      edges = 64688
+2025-11-06 22:20:21 | INFO | num port        edges = 3956
+2025-11-06 22:20:21 | INFO | num corr_global edges = 25828
+2025-11-06 22:20:21 | INFO | num corr_local  edges = 24266
+2025-11-06 22:20:22 | INFO | epoch 001 train_mae=31.5656 train_rmse=34.0831 val_mae=25.3613 val_rmse=28.2128
+2025-11-06 22:20:22 | INFO | epoch 002 train_mae=16.9470 train_rmse=20.5976 val_mae=17.4792 val_rmse=20.7602
+2025-11-06 22:20:23 | INFO | epoch 003 train_mae=11.1257 train_rmse=13.8488 val_mae=10.2129 val_rmse=12.5528
+2025-11-06 22:20:24 | INFO | epoch 004 train_mae=7.3201 train_rmse=9.2523 val_mae=5.4346 val_rmse=6.6925
+2025-11-06 22:20:24 | INFO | epoch 005 train_mae=4.4479 train_rmse=5.5838 val_mae=4.3454 val_rmse=5.3512
+2025-11-06 22:20:25 | INFO | epoch 006 train_mae=4.0042 train_rmse=5.0360 val_mae=4.8933 val_rmse=5.9386
+2025-11-06 22:20:26 | INFO | epoch 007 train_mae=3.9682 train_rmse=4.9928 val_mae=4.1471 val_rmse=5.1312
+2025-11-06 22:20:26 | INFO | epoch 008 train_mae=3.9306 train_rmse=4.9273 val_mae=4.2813 val_rmse=5.2785
+2025-11-06 22:20:27 | INFO | epoch 009 train_mae=3.8498 train_rmse=4.8353 val_mae=3.9693 val_rmse=4.9247
+2025-11-06 22:20:28 | INFO | epoch 010 train_mae=3.8255 train_rmse=4.8020 val_mae=4.0582 val_rmse=5.0288
+2025-11-06 22:20:28 | INFO | epoch 011 train_mae=3.8365 train_rmse=4.8113 val_mae=3.9370 val_rmse=4.8889
+2025-11-06 22:20:29 | INFO | epoch 012 train_mae=3.7832 train_rmse=4.7743 val_mae=4.0061 val_rmse=4.9651
+2025-11-06 22:20:29 | INFO | epoch 013 train_mae=3.7859 train_rmse=4.7758 val_mae=3.9588 val_rmse=4.9099
+2025-11-06 22:20:30 | INFO | epoch 014 train_mae=3.7964 train_rmse=4.7651 val_mae=3.9002 val_rmse=4.8431
+2025-11-06 22:20:31 | INFO | epoch 015 train_mae=3.7625 train_rmse=4.7354 val_mae=3.8178 val_rmse=4.7457
+2025-11-06 22:20:31 | INFO | epoch 016 train_mae=3.7437 train_rmse=4.7124 val_mae=4.0499 val_rmse=5.0130
+2025-11-06 22:20:32 | INFO | epoch 017 train_mae=3.7496 train_rmse=4.7266 val_mae=3.8780 val_rmse=4.8151
+2025-11-06 22:20:33 | INFO | epoch 018 train_mae=3.7930 train_rmse=4.7628 val_mae=3.8858 val_rmse=4.8242
+2025-11-06 22:20:33 | INFO | epoch 019 train_mae=3.7371 train_rmse=4.6953 val_mae=3.9374 val_rmse=4.8840
+2025-11-06 22:20:34 | INFO | epoch 020 train_mae=3.7636 train_rmse=4.7282 val_mae=3.9425 val_rmse=4.8899
+2025-11-06 22:20:34 | INFO | [TEST] RMSE = 4.2328 | MAE = 3.3907 | MSE = 17.9169
+2025-11-06 22:20:34 | INFO | [OK] wrote models/dgt5/ckpt.pt
+2025-11-06 22:50:38 | INFO | training_config={"workdir": "data/mvdgt/exp001", "pyg_dir": "data/pyg", "outdir": "models/dgt5", "epochs": 20, "lr": 0.001, "weight_decay": 0.0001, "batch_size": 1024, "seed": 17, "device": "cuda", "enable_tb": true, "tb_log_dir": "models/dgt5/tb", "enable_tqdm": true, "log_every": 50, "enable_attn_tb": false, "attn_log_every": 200, "portfolio_sim_weight": 0.0, "portfolio_jitter_std": 0.05, "model": {"hidden": 128, "heads": 2, "dropout": 0.1, "trade_dim": 2, "use_portfolio": true, "views": ["struct", "port", "corr_global", "corr_local"], "use_pf_head": true, "pf_head_hidden": null, "x_dim": null, "mkt_dim": null, "use_market": null}}
+2025-11-06 22:50:38 | INFO | market_context: available | mkt_feat shape=(90, 14) dtype=torch.float32 device=cuda:0
+2025-11-06 22:50:38 | INFO | market_context: mean=8.611089 std=24.718622
+2025-11-06 22:50:38 | INFO | portfolio_context: available | groups=170 line_items=1700 avg_len=10.00 min_len=10 max_len=10
+2025-11-06 22:50:38 | INFO | copied samples.parquet to outdir: models/dgt5/samples.parquet
+2025-11-06 22:50:38 | WARNING | market preproc computation failed: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument index in method wrapper_CUDA__index_select)
+2025-11-06 22:50:38 | INFO | corr_gate = 0.268941
+2025-11-06 22:50:38 | INFO | num struct      edges = 64688
+2025-11-06 22:50:38 | INFO | num port        edges = 3956
+2025-11-06 22:50:38 | INFO | num corr_global edges = 25828
+2025-11-06 22:50:38 | INFO | num corr_local  edges = 24266
+2025-11-06 22:50:39 | INFO | epoch 001 train_mae=31.7983 train_rmse=34.2956 val_mae=25.9022 val_rmse=28.7245
+2025-11-06 22:50:40 | INFO | epoch 002 train_mae=17.1647 train_rmse=20.8640 val_mae=16.1244 val_rmse=19.3722
+2025-11-06 22:50:40 | INFO | epoch 003 train_mae=10.7484 train_rmse=13.3013 val_mae=9.6482 val_rmse=11.8833
+2025-11-06 22:50:41 | INFO | epoch 004 train_mae=7.0243 train_rmse=8.8893 val_mae=6.0250 val_rmse=7.2434
+2025-11-06 22:50:42 | INFO | epoch 005 train_mae=4.3166 train_rmse=5.4162 val_mae=4.8883 val_rmse=5.9404
+2025-11-06 22:50:42 | INFO | epoch 006 train_mae=3.9832 train_rmse=5.0107 val_mae=4.6104 val_rmse=5.6404
+2025-11-06 22:50:43 | INFO | epoch 007 train_mae=3.9152 train_rmse=4.9155 val_mae=4.3592 val_rmse=5.3651
+2025-11-06 22:50:44 | INFO | epoch 008 train_mae=3.9132 train_rmse=4.9168 val_mae=4.2079 val_rmse=5.1976
+2025-11-06 22:50:44 | INFO | epoch 009 train_mae=3.8246 train_rmse=4.8082 val_mae=4.1415 val_rmse=5.1205
+2025-11-06 22:50:45 | INFO | epoch 010 train_mae=3.8214 train_rmse=4.7963 val_mae=3.8991 val_rmse=4.8431
+2025-11-06 22:50:46 | INFO | epoch 011 train_mae=3.7875 train_rmse=4.7793 val_mae=4.2443 val_rmse=5.2330
+2025-11-06 22:50:46 | INFO | epoch 012 train_mae=3.7806 train_rmse=4.7612 val_mae=4.0175 val_rmse=4.9795
+2025-11-06 22:50:47 | INFO | epoch 013 train_mae=3.7533 train_rmse=4.7102 val_mae=3.8666 val_rmse=4.8036
+2025-11-06 22:50:48 | INFO | epoch 014 train_mae=3.7345 train_rmse=4.7099 val_mae=3.9695 val_rmse=4.9227
+2025-11-06 22:50:48 | INFO | epoch 015 train_mae=3.7565 train_rmse=4.7387 val_mae=3.8567 val_rmse=4.7916
+2025-11-06 22:50:49 | INFO | epoch 016 train_mae=3.7445 train_rmse=4.7116 val_mae=4.0155 val_rmse=4.9749
+2025-11-06 22:50:50 | INFO | epoch 017 train_mae=3.7350 train_rmse=4.7009 val_mae=3.9386 val_rmse=4.8863
+2025-11-06 22:50:50 | INFO | epoch 018 train_mae=3.7455 train_rmse=4.7279 val_mae=4.0195 val_rmse=4.9799
+2025-11-06 22:50:51 | INFO | epoch 019 train_mae=3.7500 train_rmse=4.7227 val_mae=3.9579 val_rmse=4.9088
+2025-11-06 22:50:52 | INFO | epoch 020 train_mae=3.7087 train_rmse=4.6647 val_mae=3.9508 val_rmse=4.9005
+2025-11-06 22:50:52 | INFO | [TEST] RMSE = 4.2473 | MAE = 3.4053 | MSE = 18.0397
+2025-11-06 22:50:52 | INFO | [OK] wrote models/dgt5/ckpt.pt
+2025-11-06 23:15:47 | INFO | training_config={"workdir": "data/mvdgt/exp001", "pyg_dir": "data/pyg", "outdir": "models/dgt5", "epochs": 20, "lr": 0.001, "weight_decay": 0.0001, "batch_size": 1024, "seed": 17, "device": "cuda", "enable_tb": true, "tb_log_dir": "models/dgt5/tb", "enable_tqdm": true, "log_every": 50, "enable_attn_tb": false, "attn_log_every": 200, "portfolio_sim_weight": 0.0, "portfolio_jitter_std": 0.05, "model": {"hidden": 128, "heads": 2, "dropout": 0.1, "trade_dim": 2, "use_portfolio": true, "views": ["struct", "port", "corr_global", "corr_local"], "use_pf_head": true, "pf_head_hidden": null, "x_dim": null, "mkt_dim": null, "use_market": null}}
+2025-11-06 23:15:47 | INFO | market_context: available | mkt_feat shape=(90, 14) dtype=torch.float32 device=cuda:0
+2025-11-06 23:15:47 | INFO | market_context: mean=8.611089 std=24.718622
+2025-11-06 23:15:47 | INFO | portfolio_context: available | groups=170 line_items=1700 avg_len=10.00 min_len=10 max_len=10
+2025-11-06 23:15:47 | INFO | copied samples.parquet to outdir: models/dgt5/samples.parquet
+2025-11-06 23:15:47 | WARNING | market preproc computation failed: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument index in method wrapper_CUDA__index_select)
+2025-11-06 23:15:47 | INFO | corr_gate = 0.268941
+2025-11-06 23:15:47 | INFO | num struct      edges = 64688
+2025-11-06 23:15:47 | INFO | num port        edges = 3956
+2025-11-06 23:15:47 | INFO | num corr_global edges = 25828
+2025-11-06 23:15:47 | INFO | num corr_local  edges = 24266
+2025-11-06 23:15:48 | INFO | epoch 001 train_mae=31.7983 train_rmse=34.2956 val_mae=25.9022 val_rmse=28.7245
+2025-11-06 23:15:49 | INFO | epoch 002 train_mae=17.1647 train_rmse=20.8640 val_mae=16.1245 val_rmse=19.3723
+2025-11-06 23:15:49 | INFO | epoch 003 train_mae=10.7484 train_rmse=13.3013 val_mae=9.6483 val_rmse=11.8834
+2025-11-06 23:15:50 | INFO | epoch 004 train_mae=7.0243 train_rmse=8.8894 val_mae=6.0246 val_rmse=7.2430
+2025-11-06 23:15:51 | INFO | epoch 005 train_mae=4.3166 train_rmse=5.4162 val_mae=4.8886 val_rmse=5.9407
+2025-11-06 23:15:51 | INFO | epoch 006 train_mae=3.9832 train_rmse=5.0107 val_mae=4.6100 val_rmse=5.6400
+2025-11-06 23:15:52 | INFO | epoch 007 train_mae=3.9152 train_rmse=4.9155 val_mae=4.3585 val_rmse=5.3644
+2025-11-06 23:15:53 | INFO | epoch 008 train_mae=3.9132 train_rmse=4.9168 val_mae=4.2078 val_rmse=5.1975
+2025-11-06 23:15:53 | INFO | epoch 009 train_mae=3.8248 train_rmse=4.8083 val_mae=4.1415 val_rmse=5.1206
+2025-11-06 23:15:54 | INFO | epoch 010 train_mae=3.8214 train_rmse=4.7964 val_mae=3.8986 val_rmse=4.8426
+2025-11-06 23:15:55 | INFO | epoch 011 train_mae=3.7876 train_rmse=4.7794 val_mae=4.2443 val_rmse=5.2330
+2025-11-06 23:15:55 | INFO | epoch 012 train_mae=3.7807 train_rmse=4.7613 val_mae=4.0171 val_rmse=4.9792
+2025-11-06 23:15:56 | INFO | epoch 013 train_mae=3.7533 train_rmse=4.7102 val_mae=3.8672 val_rmse=4.8043
+2025-11-06 23:15:57 | INFO | epoch 014 train_mae=3.7344 train_rmse=4.7098 val_mae=3.9698 val_rmse=4.9229
+2025-11-06 23:15:57 | INFO | epoch 015 train_mae=3.7565 train_rmse=4.7388 val_mae=3.8572 val_rmse=4.7922
+2025-11-06 23:15:58 | INFO | epoch 016 train_mae=3.7445 train_rmse=4.7116 val_mae=4.0156 val_rmse=4.9751
+2025-11-06 23:15:59 | INFO | epoch 017 train_mae=3.7350 train_rmse=4.7009 val_mae=3.9387 val_rmse=4.8865
+2025-11-06 23:15:59 | INFO | epoch 018 train_mae=3.7455 train_rmse=4.7279 val_mae=4.0194 val_rmse=4.9799
+2025-11-06 23:16:00 | INFO | epoch 019 train_mae=3.7500 train_rmse=4.7228 val_mae=3.9579 val_rmse=4.9088
+2025-11-06 23:16:01 | INFO | epoch 020 train_mae=3.7087 train_rmse=4.6647 val_mae=3.9508 val_rmse=4.9006
+2025-11-06 23:16:01 | INFO | [TEST] RMSE = 4.2474 | MAE = 3.4054 | MSE = 18.0408
+2025-11-06 23:46:08 | INFO | training_config={"workdir": "data/mvdgt/exp001", "pyg_dir": "data/pyg", "outdir": "models/dgt5", "epochs": 20, "lr": 0.001, "weight_decay": 0.0001, "batch_size": 1024, "seed": 17, "device": "cuda", "enable_tb": true, "tb_log_dir": "models/dgt5/tb", "enable_tqdm": true, "log_every": 50, "enable_attn_tb": false, "attn_log_every": 200, "portfolio_sim_weight": 0.0, "portfolio_jitter_std": 0.05, "model": {"hidden": 128, "heads": 2, "dropout": 0.1, "trade_dim": 2, "use_portfolio": true, "views": ["struct", "port", "corr_global", "corr_local"], "use_pf_head": true, "pf_head_hidden": null, "x_dim": null, "mkt_dim": null, "use_market": null}}
+2025-11-06 23:46:08 | INFO | market_context: available | mkt_feat shape=(90, 14) dtype=torch.float32 device=cuda:0
+2025-11-06 23:46:08 | INFO | market_context: mean=8.611089 std=24.718622
+2025-11-06 23:46:08 | INFO | portfolio_context: available | groups=170 line_items=1700 avg_len=10.00 min_len=10 max_len=10
+2025-11-06 23:46:08 | INFO | copied samples.parquet to outdir: models/dgt5/samples.parquet
+2025-11-06 23:46:08 | WARNING | market preproc computation failed: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument index in method wrapper_CUDA__index_select)
+2025-11-06 23:46:08 | INFO | corr_gate = 0.268941
+2025-11-06 23:46:08 | INFO | num struct      edges = 64688
+2025-11-06 23:46:08 | INFO | num port        edges = 3956
+2025-11-06 23:46:08 | INFO | num corr_global edges = 25828
+2025-11-06 23:46:08 | INFO | num corr_local  edges = 24266
+2025-11-06 23:46:09 | INFO | epoch 001 train_mae=31.7983 train_rmse=34.2956 val_mae=25.9022 val_rmse=28.7245
+2025-11-06 23:46:10 | INFO | epoch 002 train_mae=17.1647 train_rmse=20.8640 val_mae=16.1245 val_rmse=19.3723
+2025-11-06 23:46:11 | INFO | epoch 003 train_mae=10.7484 train_rmse=13.3013 val_mae=9.6484 val_rmse=11.8836
+2025-11-06 23:46:11 | INFO | epoch 004 train_mae=7.0244 train_rmse=8.8894 val_mae=6.0250 val_rmse=7.2434
+2025-11-06 23:46:12 | INFO | epoch 005 train_mae=4.3165 train_rmse=5.4162 val_mae=4.8881 val_rmse=5.9402
+2025-11-06 23:46:13 | INFO | epoch 006 train_mae=3.9833 train_rmse=5.0108 val_mae=4.6105 val_rmse=5.6405
+2025-11-06 23:46:14 | INFO | epoch 007 train_mae=3.9153 train_rmse=4.9155 val_mae=4.3583 val_rmse=5.3642
+2025-11-06 23:46:14 | INFO | epoch 008 train_mae=3.9132 train_rmse=4.9168 val_mae=4.2078 val_rmse=5.1974
+2025-11-06 23:46:15 | INFO | epoch 009 train_mae=3.8247 train_rmse=4.8082 val_mae=4.1419 val_rmse=5.1210
+2025-11-06 23:46:16 | INFO | epoch 010 train_mae=3.8214 train_rmse=4.7964 val_mae=3.8984 val_rmse=4.8423
+2025-11-06 23:46:17 | INFO | epoch 011 train_mae=3.7875 train_rmse=4.7793 val_mae=4.2439 val_rmse=5.2325
+2025-11-06 23:46:18 | INFO | epoch 012 train_mae=3.7806 train_rmse=4.7612 val_mae=4.0171 val_rmse=4.9792
+2025-11-06 23:46:18 | INFO | epoch 013 train_mae=3.7533 train_rmse=4.7102 val_mae=3.8651 val_rmse=4.8017
+2025-11-06 23:46:19 | INFO | epoch 014 train_mae=3.7346 train_rmse=4.7100 val_mae=3.9692 val_rmse=4.9223
+2025-11-06 23:46:20 | INFO | epoch 015 train_mae=3.7566 train_rmse=4.7389 val_mae=3.8572 val_rmse=4.7922
+2025-11-06 23:46:21 | INFO | epoch 016 train_mae=3.7444 train_rmse=4.7116 val_mae=4.0154 val_rmse=4.9748
+2025-11-06 23:46:21 | INFO | epoch 017 train_mae=3.7350 train_rmse=4.7008 val_mae=3.9388 val_rmse=4.8866
+2025-11-06 23:46:22 | INFO | epoch 018 train_mae=3.7456 train_rmse=4.7279 val_mae=4.0190 val_rmse=4.9794
+2025-11-06 23:46:23 | INFO | epoch 019 train_mae=3.7500 train_rmse=4.7229 val_mae=3.9576 val_rmse=4.9085
+2025-11-06 23:46:24 | INFO | epoch 020 train_mae=3.7087 train_rmse=4.6647 val_mae=3.9505 val_rmse=4.9002
+2025-11-06 23:46:24 | INFO | [TEST] RMSE = 4.2475 | MAE = 3.4054 | MSE = 18.0410
+2025-11-06 23:59:25 | INFO | training_config={"workdir": "data/mvdgt/exp001", "pyg_dir": "data/pyg", "outdir": "models/dgt5", "epochs": 20, "lr": 0.001, "weight_decay": 0.0001, "batch_size": 1024, "seed": 17, "device": "cuda", "enable_tb": true, "tb_log_dir": "models/dgt5/tb", "enable_tqdm": true, "log_every": 50, "enable_attn_tb": false, "attn_log_every": 200, "portfolio_sim_weight": 0.0, "portfolio_jitter_std": 0.05, "model": {"hidden": 128, "heads": 2, "dropout": 0.1, "trade_dim": 2, "use_portfolio": true, "views": ["struct", "port", "corr_global", "corr_local"], "use_pf_head": true, "pf_head_hidden": null, "x_dim": null, "mkt_dim": null, "use_market": null}}
+2025-11-06 23:59:25 | INFO | market_context: available | mkt_feat shape=(90, 14) dtype=torch.float32 device=cuda:0
+2025-11-06 23:59:25 | INFO | market_context: mean=8.611089 std=24.718622
+2025-11-06 23:59:25 | INFO | portfolio_context: available | groups=170 line_items=1700 avg_len=10.00 min_len=10 max_len=10
+2025-11-06 23:59:25 | INFO | copied samples.parquet to outdir: models/dgt5/samples.parquet
+2025-11-06 23:59:25 | WARNING | market preproc computation failed: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument index in method wrapper_CUDA__index_select)
+2025-11-06 23:59:25 | INFO | corr_gate = 0.268941
+2025-11-06 23:59:25 | INFO | num struct      edges = 64688
+2025-11-06 23:59:25 | INFO | num port        edges = 3956
+2025-11-06 23:59:25 | INFO | num corr_global edges = 25828
+2025-11-06 23:59:25 | INFO | num corr_local  edges = 24266
+2025-11-06 23:59:26 | INFO | epoch 001 train_mae=31.7983 train_rmse=34.2956 val_mae=25.9022 val_rmse=28.7245
+2025-11-06 23:59:27 | INFO | epoch 002 train_mae=17.1647 train_rmse=20.8640 val_mae=16.1246 val_rmse=19.3724
+2025-11-06 23:59:28 | INFO | epoch 003 train_mae=10.7485 train_rmse=13.3013 val_mae=9.6487 val_rmse=11.8840
+2025-11-06 23:59:28 | INFO | epoch 004 train_mae=7.0245 train_rmse=8.8896 val_mae=6.0253 val_rmse=7.2436
+2025-11-06 23:59:29 | INFO | epoch 005 train_mae=4.3164 train_rmse=5.4160 val_mae=4.8881 val_rmse=5.9402
+2025-11-06 23:59:30 | INFO | epoch 006 train_mae=3.9832 train_rmse=5.0107 val_mae=4.6099 val_rmse=5.6399
+2025-11-06 23:59:30 | INFO | epoch 007 train_mae=3.9152 train_rmse=4.9154 val_mae=4.3576 val_rmse=5.3634
+2025-11-06 23:59:31 | INFO | epoch 008 train_mae=3.9132 train_rmse=4.9168 val_mae=4.2071 val_rmse=5.1967
+2025-11-06 23:59:32 | INFO | epoch 009 train_mae=3.8248 train_rmse=4.8083 val_mae=4.1416 val_rmse=5.1207
+2025-11-06 23:59:32 | INFO | epoch 010 train_mae=3.8215 train_rmse=4.7966 val_mae=3.8980 val_rmse=4.8421
+2025-11-06 23:59:33 | INFO | epoch 011 train_mae=3.7876 train_rmse=4.7795 val_mae=4.2437 val_rmse=5.2325
+2025-11-06 23:59:34 | INFO | epoch 012 train_mae=3.7807 train_rmse=4.7614 val_mae=4.0167 val_rmse=4.9788
+2025-11-06 23:59:34 | INFO | epoch 013 train_mae=3.7530 train_rmse=4.7100 val_mae=3.8723 val_rmse=4.8103
+2025-11-06 23:59:35 | INFO | epoch 014 train_mae=3.7339 train_rmse=4.7092 val_mae=3.9710 val_rmse=4.9244
+2025-11-06 23:59:36 | INFO | epoch 015 train_mae=3.7562 train_rmse=4.7383 val_mae=3.8613 val_rmse=4.7970
+2025-11-06 23:59:36 | INFO | epoch 016 train_mae=3.7445 train_rmse=4.7115 val_mae=4.0135 val_rmse=4.9726
+2025-11-06 23:59:37 | INFO | epoch 017 train_mae=3.7351 train_rmse=4.7010 val_mae=3.9400 val_rmse=4.8880
+2025-11-06 23:59:38 | INFO | epoch 018 train_mae=3.7454 train_rmse=4.7277 val_mae=4.0185 val_rmse=4.9788
+2025-11-06 23:59:38 | INFO | epoch 019 train_mae=3.7497 train_rmse=4.7223 val_mae=3.9572 val_rmse=4.9079
+2025-11-06 23:59:39 | INFO | epoch 020 train_mae=3.7086 train_rmse=4.6645 val_mae=3.9501 val_rmse=4.8998
+2025-11-06 23:59:39 | INFO | [TEST] RMSE = 4.2486 | MAE = 3.4065 | MSE = 18.0508

@@ -10,6 +10,8 @@
     "corr_global",
     "corr_local"
   ],
+  "use_pf_head": true,
+  "pf_head_hidden": null,
   "x_dim": 14,
   "mkt_dim": 14,
   "use_market": true

@@ -1,12 +1,16 @@
 # Default config to run MV-DGT end-to-end with `ptliq-run`
 # Usage:
-#   ptliq-run --config configs/mvdgt_default.yaml --workdir .
-# This will:
-#   - (optionally) simulate tiny raw data
-#   - validate raw
-#   - build graph + PyG artifacts
-#   - build MV-DGT dataset (samples + view masks)
-#   - train MV-DGT model and write metrics
+#   ptliq-run --config configs/mvdgt.default.yaml --workdir .
+#
+# Notes on sizing and recommendations (realistic prod scale):
+# - If you train on ~100k trades/day for ~6 months (~120 trading days) → ~12M samples.
+# - Recommended model size for 12M samples on a 24–48 GB GPU:
+#     model.hidden: 128–192; model.heads: 2–4; model.dropout: 0.10–0.20
+#     train.batch_size: 8k–16k (global, adjust for VRAM; use gradient accumulation if needed)
+#     lr: 1e-3 with OneCycle or 3e-4 with cosine; epochs: 3–8 (early stop on val)
+# - With CPU-only training, reduce hidden to 64–96 and batch_size to 512–2048.
+# - Portfolio head (use_pf_head) improves basket sensitivity; keep it enabled for prod.
+# - Correlation views can be heavy; if memory bound, consider removing 'corr_local' in view masks.
 
 project:
   name: pt-liqadj
@@ -24,40 +28,58 @@ paths:
 # (keeps backward-compat with RootConfig)
 data:
   mvdgt:
-    # If present, will (re)simulate a tiny dataset; remove this block to use your own raw parquet files.
+    # If present, (re)simulate a tiny dataset for smoke runs. Remove to use your own raw files.
     sim:
-      n_bonds: 200
-      n_days: 10
-      providers: [P1, P2]
-      seed: 42
+      n_bonds: 200                 # number of synthetic bonds (toy only)
+      n_days: 10                   # number of trading days (toy only)
+      providers: [P1, P2]          # quote providers (toy only)
+      seed: 42                     # simulation RNG seed
 
     # Locations (resolved relative to --workdir)
-    graph_dir: data/graph
-    pyg_dir: data/pyg
-    outdir: data/mvdgt/dgt_default      # where dataset artifacts (samples, masks, meta) go
-    models_dir: models/mvdgt            # where trained MV-DGT model + metrics go
+    graph_dir: data/graph          # where graph_nodes/edges live
+    pyg_dir: data/pyg              # where PyG graph tensors live (pyg_graph.pt)
+    outdir: data/mvdgt/dgt_default # where dataset artifacts (samples, masks, meta) go
+    models_dir: models/mvdgt       # where trained MV-DGT model + metrics go
 
-    # Dataset split ratios
-    split_train: 0.70
-    split_val: 0.15
+    # Dataset split ratios (test share = 1 - train - val)
+    split_train: 0.70              # fraction of rows used for training
+    split_val: 0.15                # fraction of rows used for validation
 
-    # Optional: path to trades parquet (default: uses simulated trades under paths.raw_dir)
+    # Optional: explicit path to trades parquet; default uses simulated or discovered location
     # trades_path: data/raw/sim/trades.parquet
 
-    # Training and model hyperparameters (mirror gat.default.yaml style)
+    # Training and model hyperparameters (explicit; mirrors MVDGTTrainConfig/MVDGTModelConfig defaults)
     train:
-      device: auto  # "cuda" or "cpu"; "auto" picks cuda if available
-      epochs: 5
-      lr: 0.001
-      weight_decay: 0.0001
-      batch_size: 512
-      seed: 17
+      device: auto                 # "cuda"/"cpu" or "auto"; "auto" picks CUDA if available
+      epochs: 5                    # total epochs; for 12M rows start with 3–8 and monitor val RMSE
+      lr: 0.001                    # base LR; OneCycle in trainer ramps this; 3e-4 for cosine is also good
+      weight_decay: 0.0001         # L2 regularization; 1e-4–3e-4 typical; increase if overfitting
+      batch_size: 512              # per-step batch (no grad accumulation here); set by VRAM: 8k–16k on 48GB
+      seed: 17                     # RNG seed for reproducibility
+      # Logging/monitoring
+      enable_tb: true              # enable TensorBoard logging
+      tb_log_dir: null             # when null → <outdir>/tb; set to a path to collate runs
+      enable_tqdm: true            # progress bars during train/val loops
+      log_every: 50                # batches between log lines (train loss, speed)
+      # Attention logging (debug/analysis only; adds overhead)
+      enable_attn_tb: false        # write attention stats to TB; off by default for speed
+      attn_log_every: 200          # batch interval for attention logging
+      # Portfolio similarity auxiliary loss (ID‑agnostic)
+      portfolio_sim_weight: 0.0    # weight for within-portfolio variance loss on z_pf; try 0.02–0.10
+      portfolio_jitter_std: 0.05   # std for optional portfolio size jitter in augments (future use)
 
     model:
-      hidden: 128
-      heads: 2
-      dropout: 0.10
-      trade_dim: 2
-      use_portfolio: true
-      # order matters; corresponds to masks in view_masks.pt
-      views: [struct, port, corr_global, corr_local]
+      hidden: 128                  # main hidden size (node/heads). 128–192 for ~12M rows on GPU; 64–96 on CPU
+      heads: 2                     # attention heads per TransformerConv; 2–4 typical; >4 rarely helps
+      dropout: 0.10                # dropout in encoders/head; 0.1–0.2 recommended at scale
+      trade_dim: 2                 # number of trade features in scorer (side_sign, log_size). Keep 2 unless you add features
+      use_portfolio: true          # enable portfolio residual fusion over node embeddings (uses port_ctx)
+      # Per‑sample portfolio head (concatenates basket vector at head; improves basket sensitivity)
+      use_pf_head: true            # enable portfolio head; requires training with this flag to be effective
+      pf_head_hidden: null         # hidden width for pf head MLP; null→use `hidden`; reduce if memory bound
+      # Graph view names used by the model. Order must match masks in view_masks.pt
+      views: [struct, port, corr_global, corr_local]  # drop 'corr_local' if memory constrained
+      # Runtime‑computed/inferred fields (persisted for exact reconstruction at inference). Usually leave as null.
+      x_dim: null                  # inferred from PyG node features at runtime; set only for debugging
+      mkt_dim: null                # inferred from market context rows; set to 0 to disable market entirely
+      use_market: null             # when null, inferred from mkt_dim>0; set true/false to force behavior

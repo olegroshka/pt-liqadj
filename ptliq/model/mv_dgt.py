@@ -108,7 +108,9 @@ class MultiViewDGT(nn.Module):
         use_market: bool = True,
         trade_dim: int = 0,
         view_names: Optional[list[str]] = None,
-    ):
+        use_pf_head: bool = False,
+        pf_head_hidden: Optional[int] = None,
+    ): 
         super().__init__()
         if TransformerConv is None:
             raise ImportError("torch-geometric is required for MultiViewDGT; install torch-geometric")
@@ -116,6 +118,7 @@ class MultiViewDGT(nn.Module):
 
         self.use_portfolio = use_portfolio
         self.use_market = use_market and (mkt_dim > 0)
+        self.use_pf_head = bool(use_pf_head)
         self.view_names = list(view_names) if (view_names is not None and len(view_names) > 0) else ["struct", "port", "corr_global", "corr_local"]
 
         # input projection
@@ -173,11 +176,26 @@ class MultiViewDGT(nn.Module):
         self.pf_proj = nn.Linear(2 * hidden, hidden)
         self.pf_gate = nn.Parameter(torch.tensor(0.0))  # start near 0; learnable gate
 
-        # regression head (anchor [+ optional market, trade])
+        # optional portfolio head mlp (per-sample basket embedding)
+        pf_h = int(hidden if (pf_head_hidden is None or pf_head_hidden <= 0) else pf_head_hidden)
+        if self.use_pf_head:
+            self.pf_head_mlp = nn.Sequential(
+                nn.Linear(hidden, pf_h),
+                nn.ReLU(),
+                nn.Linear(pf_h, hidden),
+            )
+            self.pf_head_gate = nn.Parameter(torch.tensor(0.0))
+        else:
+            self.pf_head_mlp = None
+            self.pf_head_gate = None
+
+        # regression head (anchor [+ optional market, trade, pf_head])
         in_head = hidden
         if self.use_market:
             in_head += hidden
         if self.trade_enc is not None:
+            in_head += hidden
+        if self.use_pf_head:
             in_head += hidden
         self.head = nn.Sequential(
             nn.Linear(in_head, hidden),
@@ -299,6 +317,59 @@ class MultiViewDGT(nn.Module):
         return out
 
 
+    def _encode_nodes(self, x: torch.Tensor) -> torch.Tensor:
+        """Project raw node features and run the two graph layers with normalization."""
+        h0 = self.norm0(self.enc(x))
+        h1 = self._run_layer(h0, layer=1)
+        h1 = self.norm1(h1)
+        h2 = self._run_layer(h1, layer=2)
+        h2 = self.norm2(h2)
+        return h2
+
+    def _apply_portfolio_residual(self, h: torch.Tensor, port_ctx: Optional[dict]) -> torch.Tensor:
+        """Apply portfolio residual fusion over node embeddings when context is provided."""
+        if self.use_portfolio and (port_ctx is not None):
+            V_abs, V_sgn = _portfolio_vectors(h, port_ctx, l2_normalize=True)
+            pf_feat = torch.cat([V_abs, V_sgn], dim=-1)
+            h = h + torch.sigmoid(self.pf_gate) * self.pf_proj(pf_feat)
+        return h
+
+    def _gather_anchor(self, h: torch.Tensor, anchor_idx: torch.Tensor) -> torch.Tensor:
+        return h.index_select(0, anchor_idx.long())
+
+    def _encode_market_feat(self, market_feat: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if self.use_market and (market_feat is not None):
+            return self.mkt_enc(market_feat)
+        return None
+
+    def _encode_trade_feat(self, trade_feat: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if (self.trade_enc is not None) and (trade_feat is not None):
+            return self.trade_enc(trade_feat)
+        return None
+
+    def _compute_pf_head(self, h: torch.Tensor, pf_gid: Optional[torch.Tensor], port_ctx: Optional[dict], return_aux: bool) -> tuple[list[torch.Tensor], dict, Optional[torch.Tensor]]:
+        z_list_add: list[torch.Tensor] = []
+        aux: dict = {}
+        z_pf_feat: Optional[torch.Tensor] = None
+        if (pf_gid is not None) and (port_ctx is not None):
+            # per-sample portfolio vector (permutation-invariant)
+            z_pf_feat = self._portfolio_vectors(h, pf_gid, port_ctx)
+            if return_aux:
+                aux["z_pf"] = z_pf_feat
+            if self.use_pf_head and (self.pf_head_mlp is not None):
+                z_pf_h = self.pf_head_mlp(z_pf_feat)
+                gate = torch.sigmoid(self.pf_head_gate) if (self.pf_head_gate is not None) else 1.0
+                z_list_add.append(gate * z_pf_h)
+        return z_list_add, aux, z_pf_feat
+
+    def _append_pf_placeholder_if_needed(self, z_list: list[torch.Tensor], h: torch.Tensor, anchor_idx: torch.Tensor, z_pf_feat: Optional[torch.Tensor]) -> None:
+        """If pf head is enabled but z_pf was not appended, add zeros to keep head width constant."""
+        if self.use_pf_head and (self.pf_head_mlp is not None):
+            appended = isinstance(z_pf_feat, torch.Tensor)
+            if not appended:
+                B = anchor_idx.size(0)
+                z_list.append(torch.zeros((B, h.size(1)), device=h.device, dtype=h.dtype))
+
     def forward(
         self,
         x: torch.Tensor,                    # [N, x_dim]
@@ -307,36 +378,32 @@ class MultiViewDGT(nn.Module):
         pf_gid: Optional[torch.Tensor] = None,        # [B]
         port_ctx: Optional[dict] = None,
         trade_feat: Optional[torch.Tensor] = None,    # [B, trade_dim]
-    ) -> torch.Tensor:
-        # encode nodes
-        h0 = self.norm0(self.enc(x))
+        return_aux: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict]:
+        # 1) Encode nodes through graph layers
+        h2 = self._encode_nodes(x)
+        # 2) Portfolio residual fusion (node-level)
+        h2 = self._apply_portfolio_residual(h2, port_ctx)
+        # 3) Assemble sample-wise heads
+        z_anchor = self._gather_anchor(h2, anchor_idx)
+        z_list: list[torch.Tensor] = [z_anchor]
 
-        # layer 1
-        h1 = self._run_layer(h0, layer=1)
-        h1 = self.norm1(h1)
-
-        # layer 2
-        h2 = self._run_layer(h1, layer=2)
-        h2 = self.norm2(h2)
-
-        # portfolio residual fusion over node embeddings (independent of batch)
-        if self.use_portfolio and (port_ctx is not None):
-            V_abs, V_sgn = _portfolio_vectors(h2, port_ctx, l2_normalize=True)  # (N, D), (N, D)
-            pf_feat = torch.cat([V_abs, V_sgn], dim=-1)                         # (N, 2D)
-            h2 = h2 + torch.sigmoid(self.pf_gate) * self.pf_proj(pf_feat)
-
-        # assemble sample-wise heads
-        z_anchor = h2.index_select(0, anchor_idx.long())
-        z_list = [z_anchor]
-
-        if self.use_market and (market_feat is not None):
-            z_mkt = self.mkt_enc(market_feat)
+        z_mkt = self._encode_market_feat(market_feat)
+        if z_mkt is not None:
             z_list.append(z_mkt)
 
-        if (self.trade_enc is not None) and (trade_feat is not None):
-            z_trade = self.trade_enc(trade_feat)
+        z_trade = self._encode_trade_feat(trade_feat)
+        if z_trade is not None:
             z_list.append(z_trade)
 
+        add_pf, aux, z_pf_feat = self._compute_pf_head(h2, pf_gid, port_ctx, return_aux)
+        if add_pf:
+            z_list.extend(add_pf)
+        # 4) Keep head input width constant if pf head enabled but unavailable
+        self._append_pf_placeholder_if_needed(z_list, h2, anchor_idx, z_pf_feat)
+
         z = torch.cat(z_list, dim=1)
-        yhat = self.head(z).squeeze(-1)   # [B]
+        yhat = self.head(z).squeeze(-1)
+        if return_aux:
+            return yhat, aux
         return yhat
