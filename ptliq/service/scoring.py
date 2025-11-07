@@ -148,11 +148,49 @@ class MLPScorer:
         self.dev = dev
 
     def _vectorize(self, payload: Dict[str, Any]) -> np.ndarray:
-        # Raw vector in canonical order; fall back to scaler mean for missing keys.
-        raw = np.array(
-            [float(payload.get(name, float(self.bundle.mean[i]))) for i, name in enumerate(self.bundle.feature_names)],
-            dtype=np.float32,
-        )
+        """
+        Build a raw feature vector in the model's canonical order from a request row.
+        Supports two input modes:
+          1) Pre-vectorized rows: payload already contains feature keys present in
+             bundle.feature_names → used directly.
+          2) MV-DGT parity rows: payload contains domain keys like 'isin', 'size', 'side'.
+             We derive a minimal subset:
+               - 'f_size_log' from 'size'
+               - 'f_side_buy' from 'side' (1 if buy-like, else 0)
+             All other features fall back to the scaler mean (robust baseline behavior).
+        """
+        # Start with means (robust default for missing keys)
+        raw = np.array(self.bundle.mean, dtype=np.float32).copy()
+        fnames = self.bundle.feature_names
+        # Fast name→index mapping
+        # Cache lazily
+        if not hasattr(self, "_feat_idx") or self._feat_idx is None:
+            self._feat_idx = {name: i for i, name in enumerate(fnames)}
+        idx = self._feat_idx
+
+        # 1) Direct feature overrides if provided in payload
+        for name, i in idx.items():
+            if name in payload:
+                try:
+                    raw[i] = float(payload[name])
+                except Exception:
+                    # keep mean on parse failure
+                    pass
+
+        # 2) Derive minimal features from MV-DGT-style request
+        #    - f_size_log from 'size'
+        if ("f_size_log" in idx) and ("size" in payload) and (payload.get("f_size_log") is None):
+            try:
+                raw[idx["f_size_log"]] = float(_log_size(payload.get("size")))
+            except Exception:
+                pass
+        #    - f_side_buy from 'side'
+        if ("f_side_buy" in idx) and ("side" in payload) and (payload.get("f_side_buy") is None):
+            try:
+                raw[idx["f_side_buy"]] = 1.0 if float(_side_sign(payload.get("side"))) > 0 else 0.0
+            except Exception:
+                pass
+
         # Standardize; guard against zero std → inf/NaN
         X = (raw - self.bundle.mean) / self.bundle.std
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)

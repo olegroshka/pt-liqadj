@@ -5,6 +5,7 @@ from typing import Iterable, List, Dict, Any, Optional, Tuple
 
 import json
 import math
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
@@ -24,6 +25,10 @@ class TrainConfig:
     hidden: List[int] = None   # e.g. [64,64]
     dropout: float = 0.0
     seed: int = 42
+
+    # UX / logging controls (optional)
+    enable_tqdm: bool = False  # show per-epoch batch progress
+    log_every: int = 0         # if >0, log every N batches (train loss)
 
     # future-proof hooks; harmless for current tests
     model_type: str = "mlp"          # "mlp" (default) | "gnn_xfmr"
@@ -141,10 +146,20 @@ def train_loop(
     def _rmse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return torch.sqrt(torch.mean((pred - target) ** 2))
 
+    logger = logging.getLogger("ptliq.training.mlp")
+    try:
+        from tqdm.auto import tqdm  # type: ignore
+    except Exception:  # pragma: no cover
+        tqdm = None  # type: ignore
+
     for epoch in range(1, cfg.max_epochs + 1):
         model.train()
         tr_losses = []
-        for xb, yb in _iterate_batches(X_train, y_train, cfg.batch_size):
+        batches = _iterate_batches(X_train, y_train, cfg.batch_size)
+        if cfg.enable_tqdm and tqdm is not None:
+            batches = tqdm(list(batches), desc=f"epoch {epoch}/{cfg.max_epochs}")
+        step = 0
+        for xb, yb in batches:
             xb_t = torch.from_numpy(xb).to(dev)
             yb_t = torch.from_numpy(yb).to(dev)
             pred = model(xb_t)
@@ -152,7 +167,11 @@ def train_loop(
             opt.zero_grad()
             loss.backward()
             opt.step()
-            tr_losses.append(float(loss.detach().item()))
+            l = float(loss.detach().item())
+            tr_losses.append(l)
+            step += 1
+            if cfg.log_every and cfg.log_every > 0 and (step % int(cfg.log_every) == 0):
+                logger.info(f"epoch={epoch} step={step} train_loss={l:.6f}")
 
         # validation
         model.eval()
@@ -164,6 +183,7 @@ def train_loop(
             rmse_t = _rmse(pv, yv)
             mae = float(mae_t.detach().cpu().item())
             rmse = float(rmse_t.detach().cpu().item())
+        logger.info(f"epoch_end epoch={epoch} train_loss_mean={np.mean(tr_losses) if tr_losses else float('nan'):.6f} val_mae_bps={mae:.6f} val_rmse_bps={rmse:.6f}")
 
         # ensure finiteness (history stays numeric)
         if not np.isfinite(mae):

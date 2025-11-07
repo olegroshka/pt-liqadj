@@ -38,6 +38,9 @@ class TrainConfigNode(BaseModel):
     hidden: list[int] = Field(default_factory=lambda: [64, 64])
     dropout: float = 0.0
     seed: int = 42
+    # Optional training UX controls
+    enable_tqdm: bool = False
+    log_every: int = 0
 
 class RootConfig(BaseModel):
     project: Project = Project()

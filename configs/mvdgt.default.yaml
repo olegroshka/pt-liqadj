@@ -9,7 +9,7 @@
 #     train.batch_size: 8k–16k (global, adjust for VRAM; use gradient accumulation if needed)
 #     lr: 1e-3 with OneCycle or 3e-4 with cosine; epochs: 3–8 (early stop on val)
 # - With CPU-only training, reduce hidden to 64–96 and batch_size to 512–2048.
-# - Portfolio head (use_pf_head) improves basket sensitivity; keep it enabled for prod.
+# - Portfolio head (use_pf_head) improves portfolio sensitivity; keep it enabled for prod.
 # - Correlation views can be heavy; if memory bound, consider removing 'corr_local' in view masks.
 
 project:
@@ -28,12 +28,6 @@ paths:
 # (keeps backward-compat with RootConfig)
 data:
   mvdgt:
-    # If present, (re)simulate a tiny dataset for smoke runs. Remove to use your own raw files.
-    sim:
-      n_bonds: 200                 # number of synthetic bonds (toy only)
-      n_days: 10                   # number of trading days (toy only)
-      providers: [P1, P2]          # quote providers (toy only)
-      seed: 42                     # simulation RNG seed
 
     # Locations (resolved relative to --workdir)
     graph_dir: data/graph          # where graph_nodes/edges live
@@ -74,26 +68,26 @@ data:
       dropout: 0.10                # dropout in encoders/head; 0.1–0.2 recommended at scale
       trade_dim: 2                 # number of trade features in scorer (side_sign, log_size). Keep 2 unless you add features
       use_portfolio: true          # enable portfolio residual fusion over node embeddings (uses port_ctx)
-      # Per‑sample portfolio head (concatenates basket vector at head; improves basket sensitivity)
+      # Per‑sample portfolio head (concatenates portfolio vector at head; improves portfolio sensitivity)
       use_pf_head: true            # enable portfolio head; requires training with this flag to be effective
       pf_head_hidden: 128          # hidden width for pf head MLP; set to `hidden` by default; reduce if memory bound
       # Graph view names used by the model. Order must match masks in view_masks.pt
       views: [struct, port, corr_global, corr_local]  # drop 'corr_local' if memory constrained
 
-      # Basket self-/cross-attention over request line items (per-portfolio only)
-      # When enabled, the model will contextualize each line item with the rest of its basket via a compact Transformer.
+      # Portfolio self-/cross-attention over request line items (per-portfolio only)
+      # When enabled, the model will contextualize each line item with the rest of its portfolio via a compact Transformer.
       # This makes scores sensitive to portfolio composition (permutation-invariant within a portfolio; isolated across portfolios).
       # Defaults are conservative and suitable for 200–1000 line items per portfolio.
-      use_portfolio_attn: true             # turn ON to enable basket self-/cross-attention; requires training with this flag
-      portfolio_attn_layers: 1             # number of Transformer encoder layers over basket tokens; 1–2 recommended
-      portfolio_attn_heads: 4              # attention heads inside basket encoder; 4 is a good default
-      portfolio_attn_dropout: null         # dropout inside basket encoder; null→fallback to `dropout` above (typ. 0.10)
-      portfolio_attn_hidden: null          # internal token dim for basket encoder; null→use `hidden`; reduce if VRAM is tight
-      portfolio_attn_concat_trade: true    # include per-trade features (side_sign, log_size) in basket tokens for attention
-      portfolio_attn_concat_market: false  # include market features in basket tokens (usually false; market also goes to head)
-      portfolio_attn_mode: residual        # how to fuse basket context back: 'residual' adds a gated residual; 'concat' appends to head
-      portfolio_attn_gate_init: 0.0        # logit init for the basket gate; 0.0→sigmoid(0)=0.5. Set negative (e.g., -2..-5) for safer warm-up
-      max_portfolio_len: null              # optional cap per-portfolio length for attention; set 512/1024 for very large baskets
+      use_portfolio_attn: true             # turn ON to enable portfolio self-/cross-attention; requires training with this flag
+      portfolio_attn_layers: 1             # number of Transformer encoder layers over portfolio tokens; 1–2 recommended
+      portfolio_attn_heads: 4              # attention heads inside portfolio encoder; 4 is a good default
+      portfolio_attn_dropout: null         # dropout inside portfolio encoder; null→fallback to `dropout` above (typ. 0.10)
+      portfolio_attn_hidden: null          # internal token dim for portfolio encoder; null→use `hidden`; reduce if VRAM is tight
+      portfolio_attn_concat_trade: true    # include per-trade features (side_sign, log_size) in portfolio tokens for attention
+      portfolio_attn_concat_market: false  # include market features in portfolio tokens (usually false; market also goes to head)
+      portfolio_attn_mode: residual        # how to fuse portfolio context back: 'residual' adds a gated residual; 'concat' appends to head
+      portfolio_attn_gate_init: 0.0        # logit init for the portfolio gate; 0.0→sigmoid(0)=0.5. Set negative (e.g., -2..-5) for safer warm-up
+      max_portfolio_len: null              # optional cap per-portfolio length for attention; set 512/1024 for very large portfolios
 
       # Runtime‑computed/inferred fields (persisted for exact reconstruction at inference). Usually leave as null.
       x_dim: null                  # inferred from PyG node features at runtime; set only for debugging

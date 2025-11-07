@@ -1,0 +1,31 @@
+# MLP baseline config for `ptliq-run` (simulate → validate → split → featurize → train → backtest)
+# Usage: ptliq-run --config configs/mlp.default.yaml --workdir .
+
+project:
+  name: pt-liqadj          # arbitrary experiment name (for logs only)
+  seed: 42                 # global RNG seed (can be overridden by train.seed)
+  run_id: exp_baseline     # affects output folders: data/features/<run_id>, models/<run_id>, reports/<run_id>
+
+paths:
+  raw_dir: data/raw/sim    # where bonds.parquet & trades.parquet live (simulated or provided)
+  interim_dir: data/interim # validation reports, split ranges
+  features_dir: data/features # featurized parquet splits (train/val/test)
+  models_dir: models       # trained MLP artifacts (ckpt, scaler, config)
+  reports_dir: reports     # backtest metrics and HTML/figures
+
+
+split:
+  train_end: "2025-01-07"  # train: trade_date <= train_end (~70% of 10-day sim if start≈2025-01-01)
+  val_end:   "2025-01-09"  # val: (train_end, val_end] (~15–20%); test: (val_end, max_date]
+
+train:                      # persisted to models/<run_id>/train_config.json (maps to ptliq.training.loop.TrainConfig)
+  device: auto             # "cpu" | "cuda" | "auto" (auto picks CUDA if available)
+  max_epochs: 5            # max epochs (early stops by patience)
+  batch_size: 2048         # mini-batch size
+  lr: 0.001                # Adam learning rate
+  patience: 2              # epochs without val MAE improv before stopping
+  hidden: [64, 64]         # MLP hidden layers; head predicts y_bps
+  dropout: 0.0             # dropout after ReLU in hidden layers (0 disables)
+  seed: 42                 # RNG seed for model/loader reproducibility
+  enable_tqdm: true        # show per-epoch batch progress bar
+  log_every: 50            # log train_loss every N batches via logger 'ptliq.training.mlp'
