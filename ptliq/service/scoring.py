@@ -376,10 +376,39 @@ class GRUScorer:
             # checkpoint
             state_obj = torch.load(self.workdir / "ckpt.pt", map_location="cpu")
             state_dict = state_obj.get("state_dict", state_obj)
+            # Prefer architecture recorded in checkpoint (authoritative),
+            # fallback to model_config.json and sensible defaults
+            arch = state_obj.get("arch", {}) if isinstance(state_obj, dict) else {}
+            # Update model_cfg fields from arch if present
+            try:
+                if isinstance(arch, dict):
+                    if "hidden" in arch:
+                        self.model_cfg.hidden = int(arch["hidden"])
+                    if "layers" in arch:
+                        self.model_cfg.layers = int(arch["layers"])
+                    if "dropout" in arch:
+                        self.model_cfg.dropout = float(arch["dropout"])
+                    if "window" in arch:
+                        self.model_cfg.window = int(arch["window"])
+                    # trade_dim from arch is critical for head alignment
+                    if "trade_dim" in arch and arch["trade_dim"]:
+                        self.model_cfg.trade_dim = int(arch["trade_dim"])
+            except Exception:
+                # if any cast fails, keep existing model_cfg values
+                pass
+
+            # Market dimension is determined by loaded market feature matrix
             mkt_dim = int(self._mkt_z.size(1)) if self._mkt_z is not None else 0
+            trade_dim = int(self.model_cfg.trade_dim or len(trade_names))
+            # As a final safety, ensure trade_dim matches scaler length
+            if trade_dim != len(trade_names):
+                # trust checkpoint arch if available; otherwise realign to feature list
+                trade_dim = int(arch.get("trade_dim", len(trade_names))) if isinstance(arch, dict) else len(trade_names)
+                self.model_cfg.trade_dim = trade_dim
+
             self.model = GRURegressor(
                 mkt_dim=mkt_dim,
-                trade_dim=int(self.model_cfg.trade_dim or len(trade_names)),
+                trade_dim=trade_dim,
                 hidden=int(self.model_cfg.hidden),
                 layers=int(self.model_cfg.layers),
                 dropout=float(self.model_cfg.dropout),
