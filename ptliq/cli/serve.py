@@ -7,7 +7,7 @@ import typer
 import uvicorn
 from rich import print
 import torch
-from ptliq.service.scoring import MLPScorer, DGTScorer
+from ptliq.service.scoring import MLPScorer, DGTScorer, GRUScorer
 from ptliq.service.app import create_app
 
 PID_ENV = "PTLIQ_SERVE_PIDFILE"
@@ -114,6 +114,11 @@ def app_main(
             print("[red]For model='dgt', --package must be a directory containing graph artifacts (workdir).")
             raise typer.Exit(code=2)
         scorer = DGTScorer.from_dir(package, device=device)
+    elif m == "gru":
+        if not package.is_dir():
+            print("[red]For model='gru', --package must be a training outdir containing GRU artifacts.")
+            raise typer.Exit(code=2)
+        scorer = GRUScorer.from_dir(package, device=device)
     else:
         # default to MLP packaged model
         if package.is_dir():

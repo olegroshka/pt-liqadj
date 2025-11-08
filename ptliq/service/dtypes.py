@@ -6,4 +6,4 @@ class ScoreRequest(BaseModel):
     rows: List[Dict[str, Any]] = Field(default_factory=list)
 
 class ScoreResponse(BaseModel):
-    preds_bps: List[Dict[str, Any]] # dict[isin]=score
+    preds_bps: List[Dict[str, Any]]  # list of predictions in basis points (bps)

@@ -184,6 +184,10 @@ def train_loop(
             mae = float(mae_t.detach().cpu().item())
             rmse = float(rmse_t.detach().cpu().item())
         logger.info(f"epoch_end epoch={epoch} train_loss_mean={np.mean(tr_losses) if tr_losses else float('nan'):.6f} val_mae_bps={mae:.6f} val_rmse_bps={rmse:.6f}")
+        try:
+            print(f"[MLP] epoch_end epoch={epoch} train_loss_mean={np.mean(tr_losses) if tr_losses else float('nan'):.6f} val_mae_bps={mae:.6f} val_rmse_bps={rmse:.6f}")
+        except Exception:
+            pass
 
         # ensure finiteness (history stays numeric)
         if not np.isfinite(mae):
@@ -249,10 +253,11 @@ def train_loop(
         "epoch": int(best_epoch),
         "val_mae": float(best_mae),
         "history": history,
+        "units": "bps",
     }
     (outdir / "metrics_val.json").write_text(json.dumps(metrics, indent=2))
 
-    return {"best_epoch": best_epoch, "best_val_mae_bps": float(best_mae), "best_val_rmse_bps": float(best_rmse)}
+    return {"best_epoch": best_epoch, "best_val_mae_bps": float(best_mae), "best_val_rmse_bps": float(best_rmse), "units": "bps"}
 
 
 def load_model_for_eval(

@@ -14,6 +14,7 @@ import torch
 
 from ptliq.model.mv_dgt import MultiViewDGT
 from ptliq.training.mvdgt_loop import MVDGTModelConfig
+from ptliq.training.gru_loop import GRURegressor, GRUModelConfig
 
 
 @runtime_checkable
@@ -50,13 +51,28 @@ def _load_bundle_from_dir(path: Path) -> ModelBundle:
     path = Path(path)
     feature_names = json.loads((path / "feature_names.json").read_text())
     sc = json.loads((path / "scaler.json").read_text())
-    cfg = json.loads((path / "train_config.json").read_text())
+    # Prefer model_config.json when present (aligns with GRU/MV-DGT); fallback to train_config.json
+    cfg_path_model = path / "model_config.json"
+    cfg_path_train = path / "train_config.json"
+    cfg: dict
+    if cfg_path_model.exists():
+        try:
+            cfg = json.loads(cfg_path_model.read_text())
+        except Exception:
+            cfg = {}
+    else:
+        try:
+            cfg = json.loads(cfg_path_train.read_text())
+        except Exception:
+            cfg = {}
+    hidden = cfg.get("hidden", cfg.get("model_hidden", [64, 64]))
+    dropout = cfg.get("dropout", cfg.get("model_dropout", 0.0))
     return ModelBundle(
         feature_names=feature_names,
         mean=np.array(sc["mean"], dtype=np.float32),
         std=np.array(sc["std"], dtype=np.float32),
-        hidden=cfg.get("hidden", [64, 64]),
-        dropout=cfg.get("dropout", 0.0),
+        hidden=hidden,
+        dropout=dropout,
         model_dir=path,
         ckpt_bytes=None,
     )
@@ -66,14 +82,24 @@ def _load_bundle_from_zip(zip_path: Path) -> ModelBundle:
     with zipfile.ZipFile(zip_path, "r") as z:
         feature_names = json.loads(z.read("feature_names.json"))
         sc = json.loads(z.read("scaler.json"))
-        cfg = json.loads(z.read("train_config.json"))
+        # Prefer model_config.json when present; fallback to train_config.json
+        cfg = {}
+        try:
+            cfg = json.loads(z.read("model_config.json"))
+        except KeyError:
+            try:
+                cfg = json.loads(z.read("train_config.json"))
+            except KeyError:
+                cfg = {}
         ckpt = z.read("ckpt.pt")
+    hidden = cfg.get("hidden", cfg.get("model_hidden", [64, 64]))
+    dropout = cfg.get("dropout", cfg.get("model_dropout", 0.0))
     return ModelBundle(
         feature_names=feature_names,
         mean=np.array(sc["mean"], dtype=np.float32),
         std=np.array(sc["std"], dtype=np.float32),
-        hidden=cfg.get("hidden", [64, 64]),
-        dropout=cfg.get("dropout", 0.0),
+        hidden=hidden,
+        dropout=dropout,
         model_dir=None,
         ckpt_bytes=ckpt,
     )
@@ -153,48 +179,78 @@ class MLPScorer:
         Supports two input modes:
           1) Pre-vectorized rows: payload already contains feature keys present in
              bundle.feature_names → used directly.
-          2) MV-DGT parity rows: payload contains domain keys like 'isin', 'size', 'side'.
-             We derive a minimal subset:
-               - 'f_size_log' from 'size'
-               - 'f_side_buy' from 'side' (1 if buy-like, else 0)
+          2) MV-DGT parity rows: payload contains domain keys like 'size', 'side'.
+             We derive a minimal subset when feature names include known aliases:
+               - 'f_size_log' from 'size' OR 'log_size'
+               - 'f_side_buy' from 'side' OR 'side_sign'
              All other features fall back to the scaler mean (robust baseline behavior).
         """
         # Start with means (robust default for missing keys)
         raw = np.array(self.bundle.mean, dtype=np.float32).copy()
         fnames = self.bundle.feature_names
         # Fast name→index mapping
-        # Cache lazily
         if not hasattr(self, "_feat_idx") or self._feat_idx is None:
             self._feat_idx = {name: i for i, name in enumerate(fnames)}
         idx = self._feat_idx
 
         # 1) Direct feature overrides if provided in payload
         for name, i in idx.items():
-            if name in payload:
+            if name in payload and payload[name] is not None:
                 try:
                     raw[i] = float(payload[name])
                 except Exception:
-                    # keep mean on parse failure
-                    pass
+                    pass  # keep mean on parse failure
 
-        # 2) Derive minimal features from MV-DGT-style request
-        #    - f_size_log from 'size'
-        if ("f_size_log" in idx) and ("size" in payload) and (payload.get("f_size_log") is None):
-            try:
-                raw[idx["f_size_log"]] = float(_log_size(payload.get("size")))
-            except Exception:
-                pass
-        #    - f_side_buy from 'side'
-        if ("f_side_buy" in idx) and ("side" in payload) and (payload.get("f_side_buy") is None):
-            try:
-                raw[idx["f_side_buy"]] = 1.0 if float(_side_sign(payload.get("side"))) > 0 else 0.0
-            except Exception:
-                pass
+        # 2) Derive minimal features from common domain fields
+        # size → f_size_log
+        if "f_size_log" in idx:
+            val = None
+            if "f_size_log" in payload and payload.get("f_size_log") is not None:
+                try:
+                    val = float(payload.get("f_size_log"))
+                except Exception:
+                    val = None
+            if val is None:
+                if "log_size" in payload and payload.get("log_size") is not None:
+                    try:
+                        val = float(payload.get("log_size"))
+                    except Exception:
+                        val = None
+                if val is None and ("size" in payload):
+                    try:
+                        val = float(_log_size(payload.get("size")))
+                    except Exception:
+                        val = None
+            if val is not None:
+                raw[idx["f_size_log"]] = float(val)
+
+        # side → f_side_buy (1 if buy-like else 0)
+        if "f_side_buy" in idx:
+            val = None
+            if "f_side_buy" in payload and payload.get("f_side_buy") is not None:
+                try:
+                    val = float(payload.get("f_side_buy"))
+                except Exception:
+                    val = None
+            if val is None:
+                if "side_sign" in payload and payload.get("side_sign") is not None:
+                    try:
+                        val = 1.0 if float(payload.get("side_sign")) > 0 else 0.0
+                    except Exception:
+                        val = None
+                if val is None and ("side" in payload):
+                    try:
+                        val = 1.0 if float(_side_sign(payload.get("side"))) > 0 else 0.0
+                    except Exception:
+                        val = None
+            if val is not None:
+                raw[idx["f_side_buy"]] = float(val)
 
         # Standardize; guard against zero std → inf/NaN
-        X = (raw - self.bundle.mean) / self.bundle.std
+        std = np.where(self.bundle.std <= 0, 1.0, self.bundle.std)
+        X = (raw - self.bundle.mean) / std
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-        return X
+        return X.astype(np.float32)
 
     def score_many(self, rows: List[Dict[str, Any]]) -> np.ndarray:
         if len(rows) == 0:
@@ -204,9 +260,292 @@ class MLPScorer:
             y = self.model(torch.from_numpy(X).to(self.dev)).cpu().numpy().astype(np.float32)
         if y.ndim == 2 and y.shape[1] == 1:
             y = y[:, 0]
-        # ---- sanitize for API/JSON safety ----
         y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
         return y  # shape (N,)
+
+
+class GRUScorer:
+    """Scorer for GRU baseline trained via ptliq.training.gru_loop.
+    Supports two artifact layouts:
+      1) Legacy MV-DGT-style (app_main): feature_names.json (list), scaler.json, mvdgt_meta.json, market_preproc.json
+      2) Baseline GRU (train_gru): config.json, feature_names.json ({"trade":[],"market":[]}),
+         scaler_trade.json, scaler_market.json, market_features.parquet (via config.train.feature_dir)
+    Input rows follow MV-DGT semantics: must include 'side' and 'size'; 'asof_date' used for market window.
+    """
+    def __init__(self, workdir: Path | str, device: Optional[str] = None):
+        self.workdir = Path(workdir)
+        dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(dev)
+
+        # ---- Detect artifact layout
+        feat_path = self.workdir / "feature_names.json"
+        if not feat_path.exists():
+            raise FileNotFoundError(f"feature_names.json not found in {self.workdir}")
+        try:
+            fn_blob = json.loads(feat_path.read_text())
+        except Exception:
+            fn_blob = ["side_sign", "log_size"]
+
+        baseline_mode = isinstance(fn_blob, dict) and ("trade" in fn_blob)
+
+        # ---- Load scalers and feature names
+        if baseline_mode:
+            trade_names = list(fn_blob.get("trade", ["side_sign", "log_size"]))
+            market_names = list(fn_blob.get("market", []))
+            self.bundle = _FeatBundle(trade_names)
+            # trade scaler
+            st_path = self.workdir / "scaler_trade.json"
+            sm_path = self.workdir / "scaler_market.json"
+            if not st_path.exists():
+                raise FileNotFoundError(f"expected scaler_trade.json in {self.workdir}")
+            st = json.loads(st_path.read_text())
+            mean = torch.tensor([float(v) for v in st.get("mean", [0.0]*len(trade_names))], dtype=torch.float32, device=self.device)
+            std_vals = []
+            for v in st.get("std", [1.0]*len(trade_names)):
+                try:
+                    f = float(v)
+                    std_vals.append(1.0 if not (f > 0.0) or (f != f) else f)
+                except Exception:
+                    std_vals.append(1.0)
+            std = torch.tensor(std_vals, dtype=torch.float32, device=self.device)
+            self._scaler_mean = mean
+            self._scaler_std = std
+            # market scaler
+            if sm_path.exists():
+                sm = json.loads(sm_path.read_text())
+                self._mkt_mean = torch.tensor([float(v) for v in sm.get("mean", [0.0]*len(market_names))], dtype=torch.float32, device=self.device)
+                mv = []
+                for v in sm.get("std", [1.0]*len(market_names)):
+                    try:
+                        f = float(v); mv.append(1.0 if not (f > 0.0) or (f != f) else f)
+                    except Exception:
+                        mv.append(1.0)
+                self._mkt_std = torch.tensor(mv, dtype=torch.float32, device=self.device)
+            else:
+                self._mkt_mean = None
+                self._mkt_std = None
+
+            # config + market features
+            cfg_json = self.workdir / "config.json"
+            if not cfg_json.exists():
+                raise FileNotFoundError(f"config.json not found in {self.workdir}")
+            cfg = json.loads(cfg_json.read_text())
+            train_cfg = cfg.get("train", {}) if isinstance(cfg, dict) else {}
+            feature_dir = train_cfg.get("feature_dir") or train_cfg.get("feature_dir_str")
+            if not feature_dir:
+                raise RuntimeError("config.json missing train.feature_dir")
+            feature_dir = Path(feature_dir)
+            mkt_path = feature_dir / "market_features.parquet"
+            if not mkt_path.exists():
+                raise FileNotFoundError(f"market_features.parquet not found in {feature_dir}")
+            mkt = pd.read_parquet(mkt_path)
+            if "asof_date" not in mkt.columns:
+                raise RuntimeError("market_features.parquet missing 'asof_date'")
+            mkt = mkt.copy()
+            mkt["asof_date"] = pd.to_datetime(mkt["asof_date"]).dt.normalize()
+            self._mkt_dates = pd.DatetimeIndex(mkt["asof_date"])  # sorted
+            self._mkt_mat = torch.as_tensor(mkt[[c for c in mkt.columns if c != "asof_date"]].astype(float).to_numpy(np.float32, copy=False), dtype=torch.float32, device=self.device)
+            # z-score
+            if (self._mkt_mean is not None) and (self._mkt_std is not None) and (self._mkt_mean.numel() == self._mkt_mat.size(1)):
+                denom = torch.where(self._mkt_std <= 0, torch.ones_like(self._mkt_std), self._mkt_std)
+                self._mkt_z = (self._mkt_mat - self._mkt_mean) / denom
+                self._mkt_z = torch.nan_to_num(self._mkt_z, nan=0.0, posinf=0.0, neginf=0.0)
+            else:
+                self._mkt_z = self._mkt_mat
+            # model config
+            mc_path = self.workdir / "model_config.json"
+            if mc_path.exists():
+                try:
+                    mcfg = json.loads(mc_path.read_text())
+                except Exception:
+                    mcfg = {}
+            else:
+                # Fallback to baseline config.json persisted by train_gru
+                cfg_json = self.workdir / "config.json"
+                try:
+                    blob = json.loads(cfg_json.read_text()) if cfg_json.exists() else {}
+                except Exception:
+                    blob = {}
+                mcfg = blob.get("model", {}) if isinstance(blob, dict) else {}
+            try:
+                self.model_cfg = GRUModelConfig(**mcfg)
+            except TypeError:
+                allowed = set(GRUModelConfig.__annotations__.keys())
+                mcfg = {k: v for k, v in mcfg.items() if k in allowed}
+                self.model_cfg = GRUModelConfig(**mcfg)
+            # checkpoint
+            state_obj = torch.load(self.workdir / "ckpt.pt", map_location="cpu")
+            state_dict = state_obj.get("state_dict", state_obj)
+            mkt_dim = int(self._mkt_z.size(1)) if self._mkt_z is not None else 0
+            self.model = GRURegressor(
+                mkt_dim=mkt_dim,
+                trade_dim=int(self.model_cfg.trade_dim or len(trade_names)),
+                hidden=int(self.model_cfg.hidden),
+                layers=int(self.model_cfg.layers),
+                dropout=float(self.model_cfg.dropout),
+            ).to(self.device)
+            self.model.load_state_dict(state_dict, strict=True)
+            self.model.eval()
+            self._legacy = False
+        else:
+            # ---- Legacy layout (kept for backward compatibility)
+            fnames = list(fn_blob) if isinstance(fn_blob, list) else ["side_sign", "log_size"]
+            self.bundle = _FeatBundle(fnames)
+            sc_path = self.workdir / "scaler.json"
+            if sc_path.exists():
+                s = json.loads(sc_path.read_text())
+                mean = torch.tensor([float(v) for v in s.get("mean", [0.0]*len(fnames))], dtype=torch.float32, device=self.device)
+                stdv = []
+                for v in s.get("std", [1.0]*len(fnames)):
+                    try:
+                        f = float(v)
+                        stdv.append(1.0 if not (f > 0.0) or (f != f) else f)
+                    except Exception:
+                        stdv.append(1.0)
+                std = torch.tensor(stdv, dtype=torch.float32, device=self.device)
+            else:
+                mean = torch.zeros((len(fnames),), dtype=torch.float32, device=self.device)
+                std = torch.ones((len(fnames),), dtype=torch.float32, device=self.device)
+            self._scaler_mean = mean
+            self._scaler_std = std
+            # load model config and checkpoint
+            cfg_path = self.workdir / "model_config.json"
+            if not cfg_path.exists():
+                raise FileNotFoundError(f"model_config.json not found in {self.workdir}")
+            mcfg = json.loads(cfg_path.read_text())
+            try:
+                self.model_cfg = GRUModelConfig(**mcfg)
+            except TypeError:
+                allowed = set(GRUModelConfig.__annotations__.keys())
+                mcfg = {k: v for k, v in mcfg.items() if k in allowed}
+                self.model_cfg = GRUModelConfig(**mcfg)
+            ckpt_path = self.workdir / "ckpt.pt"
+            if not ckpt_path.exists():
+                raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
+            state_obj = torch.load(ckpt_path, map_location="cpu")
+            state_dict = state_obj.get("state_dict", state_obj)
+            # Load meta & market context/index for date mapping
+            meta_path = self.workdir / "mvdgt_meta.json"
+            if not meta_path.exists():
+                raise FileNotFoundError(f"mvdgt_meta.json not found in {self.workdir}. Re-run training to persist a copy.")
+            meta = json.loads(meta_path.read_text())
+            mkt_ctx_path = meta.get("files", {}).get("market_context")
+            self.mkt_ctx = torch.load(mkt_ctx_path, map_location=self.device) if (mkt_ctx_path and Path(mkt_ctx_path).exists()) else None
+            # market preproc
+            pre_path = self.workdir / "market_preproc.json"
+            self._mkt_mean = None
+            self._mkt_std = None
+            self._mkt_sign = 1.0
+            if pre_path.exists():
+                try:
+                    pre = json.loads(pre_path.read_text())
+                    self._mkt_mean = torch.tensor(pre.get("mean", []), dtype=torch.float32, device=self.device)
+                    std_vals = [float(v) if (v is not None and float(v) > 0.0) else 1.0 for v in pre.get("std", [])]
+                    self._mkt_std = torch.tensor(std_vals, dtype=torch.float32, device=self.device)
+                    self._mkt_sign = float(pre.get("sign", 1.0))
+                except Exception:
+                    self._mkt_mean, self._mkt_std, self._mkt_sign = None, None, 1.0
+            # build GRU model
+            mkt_dim = int(self.model_cfg.mkt_dim or (int(self.mkt_ctx["mkt_feat"].size(1)) if self.mkt_ctx is not None else 0))
+            self.model = GRURegressor(
+                mkt_dim=mkt_dim,
+                trade_dim=int(self.model_cfg.trade_dim),
+                hidden=int(self.model_cfg.hidden),
+                layers=int(self.model_cfg.layers),
+                dropout=float(self.model_cfg.dropout),
+            ).to(self.device)
+            self.model.load_state_dict(state_dict, strict=True)
+            self.model.eval()
+            self._legacy = True
+
+    @classmethod
+    def from_dir(cls, workdir: Path | str, device: Optional[str] = None) -> "GRUScorer":
+        return cls(workdir=workdir, device=device)
+
+    @torch.no_grad()
+    def score_many(self, rows: List[Dict[str, Any]]) -> np.ndarray:
+        if not rows:
+            return np.zeros((0,), dtype=np.float32)
+        window = max(1, int(self.model_cfg.window or 1))
+        n = len(rows)
+        # trade features
+        side = [_side_sign(r.get("side")) for r in rows]
+        lsz = [_log_size(r.get("size")) for r in rows]
+        side_t = torch.as_tensor(side, device=self.device, dtype=torch.float32)
+        lsz_t = torch.as_tensor(lsz, device=self.device, dtype=torch.float32)
+        # align to feature_names order, impute mean for unknowns
+        feat_tensors = []
+        for i, name in enumerate(self.bundle.feature_names):
+            if name == "side_sign":
+                t = side_t
+            elif name == "log_size":
+                t = lsz_t
+            else:
+                t = torch.full((n,), float(self._scaler_mean[i].item()), device=self.device, dtype=torch.float32)
+            feat_tensors.append(t)
+        raw = torch.stack(feat_tensors, dim=1) if feat_tensors else torch.zeros((n, 0), device=self.device)
+        denom = torch.where(self._scaler_std <= 0, torch.ones_like(self._scaler_std), self._scaler_std)
+        trade = (raw - self._scaler_mean) / denom
+        trade = torch.nan_to_num(trade, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # market sequence window per row
+        if getattr(self, "_legacy", False):
+            if self.mkt_ctx is None:
+                mseq = torch.zeros((n, window, 0), dtype=torch.float32, device=self.device)
+            else:
+                last_idx = int(self.mkt_ctx["mkt_feat"].size(0) - 1)
+                # map asof_date → date_idx via nearest prior
+                idxs: List[int] = []
+                for r in rows:
+                    ts = _to_date(r.get("asof_date"))
+                    if ts is None:
+                        idxs.append(last_idx)
+                    else:
+                        # no explicit index; just clamp to last
+                        idxs.append(last_idx)
+                di = torch.as_tensor(idxs, dtype=torch.long, device=self.device)
+                mkt_feat = self.mkt_ctx["mkt_feat"]  # [T, F]
+                mseq = torch.zeros((n, window, int(mkt_feat.size(1))), dtype=torch.float32, device=self.device)
+                for w in range(window):
+                    t = di - (window - 1 - w)
+                    t = t.clamp_min(0)
+                    z = mkt_feat.index_select(0, t)
+                    if (self._mkt_mean is not None) and (self._mkt_std is not None):
+                        denom_m = torch.where(self._mkt_std <= 0, torch.ones_like(self._mkt_std), self._mkt_std)
+                        z = (z - self._mkt_mean) / denom_m
+                        z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+                        z = z * float(getattr(self, "_mkt_sign", 1.0))
+                    mseq[:, w, :] = z
+        else:
+            # baseline: use preloaded _mkt_z and _mkt_dates
+            if getattr(self, "_mkt_z", None) is None:
+                mseq = torch.zeros((n, window, 0), dtype=torch.float32, device=self.device)
+            else:
+                # nearest prior index using searchsorted over _mkt_dates
+                idxs: List[int] = []
+                for r in rows:
+                    ts = _to_date(r.get("asof_date"))
+                    if (ts is None) or (len(self._mkt_dates) == 0):
+                        idxs.append(int(self._mkt_z.size(0) - 1))
+                    else:
+                        pos = int(self._mkt_dates.searchsorted(ts, side="right") - 1)
+                        pos = max(0, min(pos, int(self._mkt_z.size(0) - 1)))
+                        idxs.append(pos)
+                di = torch.as_tensor(idxs, dtype=torch.long, device=self.device)
+                T, F = int(self._mkt_z.size(0)), int(self._mkt_z.size(1))
+                mseq = torch.zeros((n, window, F), dtype=torch.float32, device=self.device)
+                for w in range(window):
+                    t = di - (window - 1 - w)
+                    t = t.clamp_min(0)
+                    mseq[:, w, :] = self._mkt_z.index_select(0, t)
+
+        yhat = self.model(mseq, trade)
+        y = yhat.detach().cpu().numpy().astype(np.float32)
+        y = y.reshape(-1)
+        y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        return y
+
+
 
 
 # -------------------- DGTScorer --------------------

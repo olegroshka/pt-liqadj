@@ -41,14 +41,18 @@ def build_features(rawdir: Path, ranges_json: Path) -> Dict[str, pd.DataFrame]:
     tb["f_amount_log"] = np.log1p(tb["amount_out"].astype(float))
     tb["f_sector_code"] = _encode_cat(tb["sector"])
     tb["f_rating_code"] = _encode_cat(tb["rating"])
-    tb["f_curve_code"] = _encode_cat(tb["curve_bucket"])
+    tb["f_curve_code"] = _encode_cat(tb["curve_bucket"]) 
     tb["f_days_to_mty"] = _days_to_maturity(tb).astype(np.int32)
+
+    # additional flags
+    # is_portfolio — true if sale_condition4 == 'P'
+    tb["is_portfolio"] = tb.get("sale_condition4", pd.Series(index=tb.index)).eq("P").fillna(False).astype(bool)
 
     # target
     tb["y_bps"] = _target_y_bps(tb)
 
     # keep minimal columns (ts, isin, y, features)
-    keep_cols = ["ts", "isin", "trade_date", "y_bps"] + [c for c in tb.columns if c.startswith("f_")]
+    keep_cols = ["ts", "isin", "trade_date", "y_bps", "is_portfolio"] + [c for c in tb.columns if c.startswith("f_")]
     feat = tb[keep_cols].sort_values("ts").reset_index(drop=True)
 
     # apply split ranges

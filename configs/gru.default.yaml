@@ -1,0 +1,19 @@
+# Default config for GRU baseline training
+# Mirrors layout of other configs: either top-level keys or under data.gru
+
+data:
+  gru:
+    workdir: data/features/gru_baseline
+    outdir: models/gru/exp_default
+    train:
+      epochs: 20
+      lr: 0.001
+      batch_size: 512
+      patience: 3
+      seed: 42
+      device: auto
+    model:
+      hidden: 64
+      layers: 1
+      dropout: 0.0
+      window: 1

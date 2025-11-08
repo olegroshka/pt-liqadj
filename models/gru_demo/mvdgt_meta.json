@@ -1,0 +1,41 @@
+{
+  "views": {
+    "struct": [
+      2,
+      3,
+      8,
+      9
+    ],
+    "port": [
+      0,
+      1
+    ],
+    "corr_global": [
+      4,
+      6
+    ],
+    "corr_local": [
+      5,
+      7
+    ]
+  },
+  "rel2id": {
+    "COTRADE_CO": 0,
+    "COTRADE_X": 1,
+    "CURVE_BUCKET": 2,
+    "ISSUER_SIBLING": 3,
+    "MI_GLOBAL": 4,
+    "MI_LOCAL": 5,
+    "PCC_GLOBAL": 6,
+    "PCC_LOCAL": 7,
+    "RATING_NEAR": 8,
+    "SECTOR": 9
+  },
+  "files": {
+    "pyg_graph": "/home/oleg/PycharmProjects/pt-liqadj/data/pyg/pyg_graph.pt",
+    "market_context": "/home/oleg/PycharmProjects/pt-liqadj/data/pyg/market_context.pt",
+    "portfolio_context": "/home/oleg/PycharmProjects/pt-liqadj/data/pyg/portfolio_context.pt",
+    "samples": "/home/oleg/PycharmProjects/pt-liqadj/data/mvdgt/dgt_default/samples.parquet",
+    "view_masks": "/home/oleg/PycharmProjects/pt-liqadj/data/mvdgt/dgt_default/view_masks.pt"
+  }
+}

@@ -117,12 +117,20 @@ def app_main(
     # persist scaler + cfg
     with open(model_out / "scaler.json", "w", encoding="utf-8") as f:
         json.dump({"mean": stdz["mean"].tolist(), "std": stdz["std"].tolist()}, f, indent=2)
+
+    # Persist training (optimizer/loop) config for backward compatibility
     with open(model_out / "train_config.json", "w", encoding="utf-8") as f:
-        # Prefer persisting the YAML-derived node when available; else dump TrainConfig
-        if config is not None:
-            json.dump(train_cfg.__dict__, f, indent=2)
-        else:
-            json.dump(train_cfg.__dict__, f, indent=2)
+        json.dump(train_cfg.__dict__, f, indent=2)
+
+    # Persist model config (consumed by serving like GRU/MV-DGT)
+    model_cfg = {
+        "model_type": "mlp",
+        "in_dim": int(len(feat_cols)),
+        "hidden": list(map(int, train_cfg.hidden)),
+        "dropout": float(train_cfg.dropout),
+    }
+    with open(model_out / "model_config.json", "w", encoding="utf-8") as f:
+        json.dump(model_cfg, f, indent=2)
 
     print(f"[bold green]TRAIN OK[/bold green] → {model_out}")
     print(f"  best_epoch={res['best_epoch']}  val_mae_bps={res['best_val_mae_bps']:.3f}")

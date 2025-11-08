@@ -1,0 +1,29 @@
+{
+  "trade": [
+    "is_portfolio",
+    "side_sign",
+    "f_size_log",
+    "f_coupon",
+    "f_amount_log",
+    "f_sector_code",
+    "f_rating_code",
+    "f_curve_code",
+    "f_days_to_mty"
+  ],
+  "market": [
+    "MOVE_lvl",
+    "IG_OAS_bps",
+    "HY_OAS_bps",
+    "VIX_lvl",
+    "MOVE_lvl_chg_1d",
+    "MOVE_lvl_chg_5d",
+    "MOVE_lvl_z_20d",
+    "VIX_lvl_chg_1d",
+    "VIX_lvl_chg_5d",
+    "VIX_lvl_z_20d",
+    "HYIG_spread_bps",
+    "IG_OAS_chg_5d",
+    "HY_OAS_chg_5d",
+    "HYIG_chg_5d"
+  ]
+}

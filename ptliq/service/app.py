@@ -62,7 +62,7 @@ def create_app(scorer: Scorer) -> FastAPI:
             y = scorer.score_many(rows)
             # extra guard before JSON serialization
             y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
-            preds = []
+            preds_bps = []
             for row, v in zip(rows, y):
                 isin = row.get("isin")
                 portfolio_id = row.get("portfolio_id")
@@ -78,18 +78,19 @@ def create_app(scorer: Scorer) -> FastAPI:
                         item["side"] = str(side)
                     except Exception:
                         item["side"] = None
-                preds.append(item)
+                preds_bps.append(item)
             try:
                 # log quick stats of predictions
-                vals = [float(p["pred_bps"]) for p in preds if p.get("pred_bps") is not None]
+                vals = [float(p["pred_bps"]) for p in preds_bps if p.get("pred_bps") is not None]
                 if vals:
                     pmin, pmax = float(min(vals)), float(max(vals))
                 else:
                     pmin = pmax = None
-                logger.debug(f"req_id={rid} /score preds_count={len(preds)} min={pmin} max={pmax}")
+                logger.debug(f"req_id={rid} /score preds_count={len(preds_bps)} min_bps={pmin} max_bps={pmax}")
             except Exception:
                 pass
-            return ScoreResponse(preds_bps=preds)
+
+            return ScoreResponse(preds_bps=preds_bps)
         except Exception as e:
             logger.exception(f"req_id={rid} /score failed: {e}")
             raise

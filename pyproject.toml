@@ -39,6 +39,7 @@ ptliq-run = "ptliq.cli.run:app"
 ptliq-web = "ptliq.cli.web:app"
 ptliq-dgt-build = "ptliq.cli.mvdgt_build:app"
 ptliq-dgt-train = "ptliq.cli.mvdgt_train:app"
+ptliq-gru-train = "ptliq.cli.gru_train:app"
 
 ptliq-exp = "ptliq.cli.exp_gnn_vs_baseline:app"
 

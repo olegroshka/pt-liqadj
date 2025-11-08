@@ -1,0 +1,6 @@
+{
+  "best_epoch": 3,
+  "best_val_mae_bps": 2.2751853466033936,
+  "best_val_rmse_bps": 7.162668704986572,
+  "units": "bps"
+}
