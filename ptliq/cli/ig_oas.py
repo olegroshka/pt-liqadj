@@ -1,8 +1,8 @@
 from __future__ import annotations
+
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
 import typer
 from rich import print
 
@@ -15,7 +15,7 @@ app = typer.Typer(no_args_is_help=False, invoke_without_command=True)
 @app.callback(invoke_without_command=True)
 def _default(
     ctx: typer.Context,
-    years: int = typer.Option(5, help="Number of past years to fetch if --start/--end not provided"),
+    years: int = typer.Option(3, help="Number of past years to fetch if --start/--end not provided"),
     start: Optional[str] = typer.Option(None, help="Start date (YYYY-MM-DD). Overrides --years."),
     end: Optional[str] = typer.Option(None, help="End date (YYYY-MM-DD). Defaults to today."),
     out: Path = typer.Option(Path("data/raw/ig_oas.parquet"), help="Output parquet path"),
