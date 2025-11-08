@@ -413,12 +413,13 @@ def _compute_market_preproc(samples_df: pd.DataFrame, mkt_ctx: Optional[dict], l
         ycol = samples_df[samples_df["split"] == "train"]["y"].astype(float)
         if len(df) < 10:
             return {"mean": m_mean.detach().cpu().tolist(), "std": m_std.detach().cpu().tolist(), "sign": 1.0}
-        idx = torch.as_tensor(df.to_numpy(), dtype=torch.long)
+        # Ensure all tensors are on the same device as mf
+        idx = torch.as_tensor(df.to_numpy(), dtype=torch.long, device=mf.device)
         M = mf.index_select(0, idx).float()  # [N, F]
-        y = torch.as_tensor(ycol.to_numpy(), dtype=torch.float32).view(-1, 1)
+        y = torch.as_tensor(ycol.to_numpy(), dtype=torch.float32, device=mf.device).view(-1, 1)
         Mz = (M - m_mean) / m_std
         lam = 1e-3
-        ATA = Mz.T @ Mz + lam * torch.eye(Mz.size(1))
+        ATA = Mz.T @ Mz + lam * torch.eye(Mz.size(1), device=Mz.device)
         b = torch.linalg.solve(ATA, Mz.T @ y)  # [F,1]
         fit = (Mz @ b).view(-1)
         try:
@@ -526,23 +527,76 @@ def _portfolio_similarity_loss(z_pf: torch.Tensor, pf_gid: torch.Tensor) -> torc
 # ---------------- helper utilities  ----------------
 
 def _load_pyg_and_view_masks(meta: dict, workdir: Path, device: torch.device, outdir: Path, logger) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], dict]:
-    """Load PyG graph tensors and view masks, copy masks to outdir, and move to device.
+    """Load PyG graph tensors and view masks, validate consistency, and copy masks to outdir.
     Returns (x, edge_index, edge_weight, view_masks_on_device).
     """
     data = torch.load(meta["files"]["pyg_graph"], map_location="cpu", weights_only=False)
     view_masks = torch.load(workdir / "view_masks.pt", map_location="cpu", weights_only=False)
+
+    # Validate that each mask is boolean 1D and matches the number of edges in the loaded graph
+    try:
+        E = int(data.edge_index.size(1))
+        # Normalize mask dtypes and shapes
+        def _as_bool_1d(t: torch.Tensor) -> torch.Tensor:
+            t = t.view(-1)
+            if t.dtype != torch.bool:
+                t = (t != 0)
+            return t
+        vm_norm = {k: _as_bool_1d(v) for k, v in view_masks.items()}
+        bad = {k: int(v.numel()) for k, v in vm_norm.items() if int(v.numel()) != E}
+        if bad:
+            # Attempt deterministic reconstruction when possible using edge_type + meta['views'] (relation id sets)
+            rebuilt: dict[str, torch.Tensor] | None = None
+            try:
+                edge_type = getattr(data, "edge_type", None)
+                views_meta = meta.get("views") if isinstance(meta, dict) else None
+                if isinstance(edge_type, torch.Tensor) and (edge_type.numel() == E) and isinstance(views_meta, dict):
+                    # views_meta should be mapping view_name -> list[int] of relation IDs
+                    rebuilt = {}
+                    for name, ids in views_meta.items():
+                        if not isinstance(ids, (list, tuple)):
+                            continue
+                        ids_t = torch.as_tensor([int(i) for i in ids], dtype=torch.long)
+                        rebuilt[name] = torch.isin(edge_type.view(-1), ids_t)
+                    # if we successfully built all four primary masks, adopt them
+                    required = {"struct", "port", "corr_global", "corr_local"}
+                    if required.issubset(set(rebuilt.keys())):
+                        vm_norm = rebuilt
+                        bad = {}
+            except Exception as e:
+                logger.warning(f"failed to reconstruct view masks from edge_type/meta: {e}")
+        # If still bad after attempted reconstruction, raise with a clear message
+        if bad:
+            details = ", ".join([f"{k}:len={n}" for k, n in bad.items()])
+            raise RuntimeError(
+                f"view_masks length mismatch vs graph edges (E={E}). Offending masks: {details}. "
+                f"Rebuild dataset artifacts so that view_masks.pt is produced from the same pyg_graph.pt."
+            )
+        view_masks = vm_norm
+    except Exception as e:
+        # Surface the error early during training
+        raise
+
     # also persist a copy to outdir for DGTScorer compatibility
     try:
         vm_cpu = {k: v.detach().cpu() for k, v in view_masks.items()}
         torch.save(vm_cpu, outdir / "view_masks.pt")
     except Exception:
         logger.warning("failed to copy view_masks.pt to outdir")
+
     # inputs: node features (from PyG), edge stuff for building the model
     x = data.x.float().to(device)
     edge_index = data.edge_index.to(device)
     edge_weight = data.edge_weight.to(device) if hasattr(data, "edge_weight") else None
     for k in list(view_masks.keys()):
         view_masks[k] = view_masks[k].to(device)
+
+    # Guard: ensure required masks exist for configured views
+    cfg_views = set(["struct", "port", "corr_global", "corr_local"])  # baseline set
+    missing = [k for k in cfg_views if k not in view_masks]
+    if missing:
+        raise RuntimeError(f"view_masks missing required keys: {missing}")
+
     return x, edge_index, edge_weight, view_masks
 
 

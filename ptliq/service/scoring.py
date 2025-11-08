@@ -681,6 +681,69 @@ def _build_runtime_port_ctx(
     return port_ctx, pf_gid_t
 
 
+def _build_runtime_port_ctx_from_explicit_gid(
+    rows: List[Dict[str, Any]],
+    node_ids: List[int],
+    device: torch.device,
+) -> Optional[dict]:
+    """
+    Build per-request portfolio context using explicit pf_gid provided in rows.
+    Returns port_ctx dict or None if no valid pf_gid present.
+    Weights are permutation-invariant within each provided group:
+      - abs weight ∝ abs(size)
+      - signed weight ∝ side_sign * abs(size)
+      - both normalized within the group to sum(abs)=1
+    """
+    groups: dict[int, list[int]] = {}
+    for i, r in enumerate(rows):
+        try:
+            g = int(r.get("pf_gid", -1))
+        except Exception:
+            g = -1
+        if g >= 0:
+            groups.setdefault(g, []).append(i)
+    if not groups:
+        return None
+
+    port_nodes: list[int] = []
+    port_w_abs: list[float] = []
+    port_w_sgn: list[float] = []
+    port_len: list[int] = []
+
+    for g, idxs in sorted(groups.items(), key=lambda kv: kv[0]):
+        abs_sizes: list[float] = []
+        sgn_sizes: list[float] = []
+        for i in idxs:
+            side = _side_sign(rows[i].get("side"))
+            try:
+                sz = float(rows[i].get("size", 0.0))
+            except Exception:
+                sz = 0.0
+            a = abs(sz)
+            s = (1.0 if side >= 0 else -1.0) * a
+            abs_sizes.append(a)
+            sgn_sizes.append(s)
+        abs_arr = np.asarray(abs_sizes, dtype=np.float32)
+        sgn_arr = np.asarray(sgn_sizes, dtype=np.float32)
+        denom = float(abs_arr.sum())
+        if denom <= 0.0 or not np.isfinite(denom):
+            denom = float(len(abs_arr)) if len(abs_arr) > 0 else 1.0
+        w_abs = (abs_arr / denom).astype(np.float32)
+        w_sgn = (sgn_arr / denom).astype(np.float32)
+        port_len.append(len(idxs))
+        for i, wA, wS in zip(idxs, w_abs, w_sgn):
+            port_nodes.append(int(node_ids[i]))
+            port_w_abs.append(float(wA))
+            port_w_sgn.append(float(wS))
+
+    return {
+        "port_nodes_flat": torch.tensor(port_nodes, dtype=torch.long, device=device),
+        "port_w_abs_flat": torch.tensor(port_w_abs, dtype=torch.float32, device=device),
+        "port_w_signed_flat": torch.tensor(port_w_sgn, dtype=torch.float32, device=device),
+        "port_len": torch.tensor(port_len, dtype=torch.long, device=device),
+    }
+
+
 class _FeatBundle:
     def __init__(self, feature_names: List[str]):
         self.feature_names = feature_names
@@ -793,15 +856,41 @@ class DGTScorer:
             raise FileNotFoundError(f"meta not found: {meta_path}")
         self.meta = json.loads(meta_path.read_text())
 
-        # load graph + masks
-        view_masks = torch.load(self.workdir / "view_masks.pt", map_location="cpu")
-        self.view_masks = {k: v.to(self.device) for k, v in view_masks.items()}
-
+        # load graph first (needed to validate masks)
         pyg_graph_path = Path(self.meta["files"]["pyg_graph"])
         data = torch.load(pyg_graph_path, map_location="cpu", weights_only=False)
         self.x = data.x.float().to(self.device)
         self.edge_index = data.edge_index.to(self.device)
         self.edge_weight = data.edge_weight.to(self.device) if hasattr(data, "edge_weight") else None
+        # load view masks: prefer meta['files']['view_masks'] if present; else fallback to workdir copy
+        masks_path = None
+        try:
+            masks_path = self.meta.get("files", {}).get("view_masks")
+        except Exception:
+            masks_path = None
+        if masks_path and Path(masks_path).exists():
+            vm_src = Path(masks_path)
+        else:
+            vm_src = self.workdir / "view_masks.pt"
+        if not vm_src.exists():
+            raise FileNotFoundError(f"view_masks.pt not found at {vm_src}. Ensure dataset builder saved masks.")
+        view_masks = torch.load(vm_src, map_location="cpu")
+        # Validate masks vs edge count E
+        E = int(self.edge_index.size(1))
+        def _as_bool_1d(t: torch.Tensor) -> torch.Tensor:
+            t = t.view(-1)
+            if t.dtype != torch.bool:
+                t = (t != 0)
+            return t
+        vm_norm = {k: _as_bool_1d(v) for k, v in view_masks.items()}
+        bad = {k: int(v.numel()) for k, v in vm_norm.items() if int(v.numel()) != E}
+        if bad:
+            details = ", ".join([f"{k}:len={n}" for k, n in bad.items()])
+            raise RuntimeError(
+                f"view_masks length mismatch vs graph edges (E={E}). Offending masks: {details}. "
+                f"Use masks built from the same pyg_graph; if using prebuilt artifacts, ensure meta['files']['view_masks'] points to the correct masks."
+            )
+        self.view_masks = {k: v.to(self.device) for k, v in vm_norm.items()}
         # ensure runtime dims are set
         if self._cfg_obj.x_dim is None:
             self._cfg_obj.x_dim = int(self.x.size(1))
@@ -986,14 +1075,22 @@ class DGTScorer:
                     idxs.append(int(idx_arr[pos]))
             di = torch.as_tensor(idxs, dtype=torch.long, device=self.device)
             market_feat = self.mkt_ctx["mkt_feat"].index_select(0, di)
+            # apply z-score and orientation sign if available (train/serve parity)
+            if (getattr(self, "_mkt_mean", None) is not None) and (getattr(self, "_mkt_std", None) is not None):
+                denom = torch.where(self._mkt_std <= 0, torch.ones_like(self._mkt_std), self._mkt_std)
+                market_feat = (market_feat - self._mkt_mean) / denom
+                market_feat = torch.nan_to_num(market_feat, nan=0.0, posinf=0.0, neginf=0.0)
+                try:
+                    market_feat = market_feat * float(getattr(self, "_mkt_sign", 1.0))
+                except Exception:
+                    pass
 
-        # --- Portfolio context & pf_gid selection (runtime > explicit > training-derived)
+        # --- Portfolio context & pf_gid selection (prefer dynamic per-request context)
         any_explicit = any(("pf_gid" in r) and (r["pf_gid"] is not None) for r in rows)
-        runtime_port_ctx, runtime_pf_gid = _build_runtime_port_ctx(rows, node_ids, self.device)
-        if (runtime_port_ctx is not None) and (not any_explicit):
-            port_ctx = runtime_port_ctx
-            pf_gid = runtime_pf_gid
-        elif any_explicit:
+        port_ctx = None
+        pf_gid = None
+        if any_explicit:
+            # Use provided pf_gid vector
             pf_list: List[int] = []
             for r in rows:
                 v = r.get("pf_gid", -1)
@@ -1002,13 +1099,29 @@ class DGTScorer:
                 except Exception:
                     pf_list.append(-1)
             pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
-            port_ctx = self.port_ctx
+            # Build dynamic port_ctx to match explicit groups if possible
+            try:
+                port_ctx = _build_runtime_port_ctx_from_explicit_gid(rows, node_ids, self.device)
+            except NameError:
+                port_ctx = None
+            if port_ctx is None:
+                # fallback: try grouping by portfolio_id
+                _ctx2, _pf2 = _build_runtime_port_ctx(rows, node_ids, self.device)
+                port_ctx = _ctx2
+                # keep pf_gid from request as authoritative
         else:
-            pf_list: List[int] = []
-            for nid in node_ids:
-                pf_list.append(int(self._node_to_pfgid.get(int(nid), -1)))
-            pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
-            port_ctx = self.port_ctx
+            # No explicit pf_gid; try runtime grouping by portfolio_id
+            runtime_port_ctx, runtime_pf_gid = _build_runtime_port_ctx(rows, node_ids, self.device)
+            if runtime_port_ctx is not None:
+                port_ctx = runtime_port_ctx
+                pf_gid = runtime_pf_gid
+            else:
+                # fallback to training-derived gids and context
+                pf_list: List[int] = []
+                for nid in node_ids:
+                    pf_list.append(int(self._node_to_pfgid.get(int(nid), -1)))
+                pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
+                port_ctx = self.port_ctx
 
         yhat = self.model(
             self.x,

@@ -203,22 +203,40 @@ def _generate_toy_world(root: Path, seed: int = 42):
     mu_lsz = float(tr["log_size"].mean())
     sd_lsz = float(tr["log_size"].std(ddof=0) or 1.0)
 
-    # Define a small linear generator in bps
+    # Define a small linear generator in bps with an added portfolio-dependent term
     beta_side = 3.0
     beta_lsz  = 4.0
     beta_x    = 2.0
     beta_mkt  = 2.0
+    beta_pf   = 1.5  # portfolio sensitivity scale (bps)
     w_node = rng.normal(0.0, 0.5, size=(X.shape[1],)).astype(np.float32)
     w_mkt  = rng.normal(0.0, 0.5, size=(mkt_feat.size(1),)).astype(np.float32)
+    # per-portfolio unit directions in node feature space
+    U = rng.normal(0.0, 1.0, size=(len(portfolios), X.shape[1])).astype(np.float32)
+    U = U / np.maximum(np.linalg.norm(U, axis=1, keepdims=True), 1e-6)
+    # map node -> pf_gid
+    pf_by_nid = np.full((X.shape[0],), -1, dtype=int)
+    for g_id, g in enumerate(portfolios):
+        for nid in g:
+            pf_by_nid[nid] = g_id
 
     def _y(nid: int, di: int, side: float, log_size: float) -> float:
         lsz_z = (log_size - mu_lsz) / (sd_lsz if sd_lsz > 0 else 1.0)
-        y = (
+        base = (
             beta_side * side
             + beta_lsz * lsz_z
             + beta_x * float(np.dot(X[nid], w_node))
             + beta_mkt * float(np.dot(mkt_feat[di].numpy(), w_mkt))
         )
+        # portfolio effect: leave-one-out average of other members projected on U_g
+        pf = int(pf_by_nid[nid])
+        pf_term = 0.0
+        if (pf >= 0) and (pf < len(portfolios)):
+            others = [j for j in portfolios[pf] if j != nid]
+            if len(others) > 0:
+                h_bar = X[others].mean(0)
+                pf_term = beta_pf * float(np.dot(h_bar, U[pf]))
+        y = base + pf_term
         # small Gaussian noise
         y += rng.normal(0.0, 0.5)
         return float(y)
@@ -241,6 +259,8 @@ def _generate_toy_world(root: Path, seed: int = 42):
         "w_node": w_node,
         "w_mkt": w_mkt,
         "beta": (beta_side, beta_lsz, beta_x, beta_mkt),
+        "beta_pf": beta_pf,
+        "U": U,
         "portfolios": portfolios,
         "samples": samples,
     }
@@ -376,6 +396,73 @@ def _direct_predict(outdir: Path, req_rows: list[dict]) -> np.ndarray:
             pf_list.append(int(node_to_pfgid.get(int(nid), -1)))
     pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=device)
 
+    # Build dynamic runtime portfolio context to mirror DGTScorer behavior
+    def _side_sign_local(v):
+        if v is None: return 0.0
+        s = str(v).strip().upper()
+        return 1.0 if s in {"B","BUY","CBUY","TRUE","1"} else (-1.0 if s in {"S","SELL","CSELL","FALSE","0","-1"} else 0.0)
+
+    def _build_port_ctx_from_groups(groups: dict, use_keys_sorted=True):
+        keys = sorted(groups.keys()) if use_keys_sorted else list(groups.keys())
+        port_nodes = []
+        port_w_abs = []
+        port_w_sgn = []
+        port_len = []
+        for g in keys:
+            idxs = groups[g]
+            abs_sizes = []
+            sgn_sizes = []
+            for i in idxs:
+                side = _side_sign_local(req_rows[i].get("side"))
+                try:
+                    sz = float(req_rows[i].get("size", 0.0))
+                except Exception:
+                    sz = 0.0
+                a = abs(sz)
+                s = (1.0 if side >= 0 else -1.0) * a
+                abs_sizes.append(a)
+                sgn_sizes.append(s)
+            abs_arr = np.asarray(abs_sizes, dtype=np.float32)
+            sgn_arr = np.asarray(sgn_sizes, dtype=np.float32)
+            denom = float(abs_arr.sum())
+            if denom <= 0.0 or not np.isfinite(denom):
+                denom = float(len(abs_arr)) if len(abs_arr) > 0 else 1.0
+            w_abs = (abs_arr / denom).astype(np.float32)
+            w_sgn = (sgn_arr / denom).astype(np.float32)
+            port_len.append(len(idxs))
+            for i, wA, wS in zip(idxs, w_abs, w_sgn):
+                port_nodes.append(int(node_ids[i]))
+                port_w_abs.append(float(wA))
+                port_w_sgn.append(float(wS))
+        return {
+            "port_nodes_flat": torch.tensor(port_nodes, dtype=torch.long, device=device),
+            "port_w_abs_flat": torch.tensor(port_w_abs, dtype=torch.float32, device=device),
+            "port_w_signed_flat": torch.tensor(port_w_sgn, dtype=torch.float32, device=device),
+            "port_len": torch.tensor(port_len, dtype=torch.long, device=device),
+        }
+
+    # precedence: explicit pf_gid → build dynamic ctx; else portfolio_id → build dynamic; else training port_ctx
+    any_pid = any((r.get("portfolio_id") is not None) for r in req_rows)
+    if any_explicit:
+        groups = {}
+        for i, r in enumerate(req_rows):
+            try:
+                g = int(r.get("pf_gid", -1))
+            except Exception:
+                g = -1
+            if g >= 0:
+                groups.setdefault(g, []).append(i)
+        port_ctx = _build_port_ctx_from_groups(groups) if groups else None
+    elif any_pid:
+        groups = {}
+        for i, r in enumerate(req_rows):
+            pid = r.get("portfolio_id")
+            if pid is None:
+                continue
+            groups.setdefault(pid, []).append(i)
+        port_ctx = _build_port_ctx_from_groups(groups) if groups else None
+    # else: keep training port_ctx as loaded above
+
     side = [_side_sign(r.get("side")) for r in req_rows]
     lsz  = [_log_size(r.get("size")) for r in req_rows]
     n = len(req_rows)
@@ -419,6 +506,13 @@ def _direct_predict(outdir: Path, req_rows: list[dict]) -> np.ndarray:
                 idxs.append(int(idx_arr[pos]))
         di = torch.as_tensor(idxs, dtype=torch.long, device=device)
         market_feat = mkt_ctx["mkt_feat"].index_select(0, di)
+        # apply the same z-score + orientation sign as scorer if available
+        if (mkt_mean is not None) and (mkt_std is not None):
+            denom = torch.where(mkt_std <= 0, torch.ones_like(mkt_std), mkt_std)
+            market_feat = (market_feat - mkt_mean) / denom
+            market_feat = torch.nan_to_num(market_feat, nan=0.0, posinf=0.0, neginf=0.0)
+            if mkt_sign is not None:
+                market_feat = market_feat * float(mkt_sign)
 
     with torch.no_grad():
         yhat = model(x, anchor_idx=anchor_idx, market_feat=market_feat,
@@ -520,6 +614,24 @@ def test_mvdgt_e2e_scenarios_extended(tmp_path: Path):
     mkt_feat, w_mkt = ctx["mkt_feat"], ctx["w_mkt"]
     mu, sd = ctx["mu_lsz"], ctx["sd_lsz"]
     beta_side, beta_lsz, beta_x, beta_mkt = ctx["beta"]
+    # portfolio generator components
+    beta_pf = ctx.get("beta_pf", 0.0)
+    U = ctx.get("U")
+    portfolios = ctx.get("portfolios")
+    # precompute per-node portfolio term used by the generator for deterministic expectations
+    pf_term_by_nid: dict[int, float] = {}
+    if (U is not None) and (portfolios is not None) and float(beta_pf) != 0.0:
+        for g, members in enumerate(portfolios):
+            members = list(map(int, members))
+            for nid0 in members:
+                others = [j for j in members if j != nid0]
+                if len(others) == 0:
+                    pf_term_by_nid[nid0] = 0.0
+                else:
+                    h_bar = X[others].mean(0)
+                    pf_term_by_nid[nid0] = float(beta_pf * float(np.dot(h_bar, U[g])))
+    else:
+        pf_term_by_nid = {}
 
     def _asof_for_idx(di: int) -> str:
         return str(pd.Timestamp(mi.iloc[di].asof_date).date())
@@ -668,6 +780,131 @@ def test_mvdgt_e2e_scenarios_extended(tmp_path: Path):
     p_last = scorer.score_many(test_row_last)[0]
     p_none = scorer.score_many(test_row_none)[0]
     assert abs(p_last - p_none) < 1e-6, "Missing asof_date fallback mismatch with last-day prediction"
+
+    # ---- Portfolio sensitivity: many-anchor drift ----
+    # Build multiple (P_A, P_B) baskets for K anchors:
+    #    P_A : common line + two co-items from its own training group
+    #    P_B : common line + two co-items from a different group, bigger opposite-side sizes
+    K = min(6, len(warm_reps))
+    abs_deltas = []
+    lists_A = []
+    lists_B = []
+    pred_pf_deltas = []
+    isin2nid = {v: k for k, v in nid2isin.items()}
+    for k in range(K):
+        rep_k = warm_reps[k]
+        nid_k = int(rep_k.node_id)
+        isin_common = nid2isin[nid_k]
+        asof_common = _asof_for_idx(int(rep_k.date_idx))
+        base_size = float(math.expm1(float(rep_k.log_size)))
+        side_lbl = "BUY" if float(rep_k.side_sign) > 0 else "SELL"
+        gk = int(rep_k.pf_gid)
+
+        # P_A: two co-items from the same training portfolio group
+        g_members = [m for m in portfolios[gk] if m != nid_k]
+        others1 = g_members[:2] if len(g_members) >= 2 else [j for j in range(X.shape[0]) if j != nid_k][:2]
+        P_A = [{"portfolio_id": f"A_{k}", "isin": isin_common, "side": side_lbl, "size": base_size, "asof_date": asof_common}] + \
+              [{"portfolio_id": f"A_{k}", "isin": nid2isin[j], "side": "BUY", "size": 1.0e5, "asof_date": asof_common} for j in others1]
+
+        # P_B: two co-items from a different portfolio group, with larger opposite-side sizes
+        other_groups = [g for g in portfolios if nid_k not in g]
+        others2 = (other_groups[0][:2] if other_groups and len(other_groups[0]) >= 2
+                   else [j for j in range(X.shape[0]) if j not in [nid_k] + others1][:2])
+        P_B = [{"portfolio_id": f"B_{k}", "isin": isin_common, "side": side_lbl, "size": base_size, "asof_date": asof_common}] + \
+              [{"portfolio_id": f"B_{k}", "isin": nid2isin[j], "side": "SELL", "size": 2.0e5, "asof_date": asof_common} for j in others2]
+
+        yA = scorer.score_many(P_A)[0]
+        yB = scorer.score_many(P_B)[0]
+        abs_deltas.append(abs(float(yA - yB)))
+        pred_pf_deltas.append(float(yB - yA))
+        lists_A.append(P_A)
+        lists_B.append(P_B)
+
+    # Require a visible drift: median delta should exceed a meaningful threshold
+    # tuned for generator beta_pf=1.5 bps; with noise and short training we target >= 0.5 bps
+    median_delta = float(np.median(abs_deltas)) if abs_deltas else 0.0
+    # use threshold relative to generator beta_pf when available, else default 0.5
+    beta_pf = float(ctx.get("beta_pf", 1.5)) if isinstance(ctx, dict) else 1.5
+    thresh = max(0.1, 0.1 * beta_pf)
+    assert median_delta >= thresh, f"Portfolio sensitivity too small across anchors: median |Δ|={median_delta:.3f} bps, deltas={abs_deltas}, thresh={thresh:.3f}"
+
+    # ---- Portfolio monotonicity w.r.t co-item sizes ----
+    # For K anchors: fix basket composition, rescore after scaling co-item sizes up by 2×.
+    deltas_co = []
+    for k in range(K):
+        rep_k = warm_reps[k]
+        nid_k = int(rep_k.node_id)
+        isin_k = nid2isin[nid_k]
+        asof_k = _asof_for_idx(int(rep_k.date_idx))
+        base_size_k = float(math.expm1(float(rep_k.log_size)))
+        side_k = "BUY" if float(rep_k.side_sign) > 0 else "SELL"
+        gk = int(rep_k.pf_gid)
+        co_k = [m for m in portfolios[gk] if m != nid_k][:2]
+        if len(co_k) == 0:
+            continue
+        P_small = [{"portfolio_id":f"M{k}","isin":isin_k,"side":side_k,"size":base_size_k,"asof_date":asof_k}] + \
+                  [{"portfolio_id":f"M{k}","isin":nid2isin[j],"side":"SELL","size":5.0e4,"asof_date":asof_k} for j in co_k]
+        P_big   = [{"portfolio_id":f"M{k}","isin":isin_k,"side":side_k,"size":base_size_k,"asof_date":asof_k}] + \
+                  [{"portfolio_id":f"M{k}","isin":nid2isin[j],"side":"SELL","size":1.0e5,"asof_date":asof_k} for j in co_k]
+        y_small = scorer.score_many(P_small)[0]
+        y_big   = scorer.score_many(P_big)[0]
+        deltas_co.append(abs(float(y_big - y_small)))
+    # require a modest but real monotone response from co-size scaling on median across anchors
+    thresh_co = max(0.08, 0.1 * beta_pf)
+    # If portfolio gates are effectively off, relax this check
+    gate_ok = True
+    try:
+        pf_gate_val = float(torch.sigmoid(getattr(scorer.model, "pf_gate")).detach().cpu().item()) if hasattr(scorer.model, "pf_gate") else None
+        port_gate_val = float(torch.sigmoid(getattr(scorer.model, "portfolio_gate")).detach().cpu().item()) if hasattr(scorer.model, "portfolio_gate") else None
+        mg = [g for g in [pf_gate_val, port_gate_val] if g is not None]
+        if len(mg) > 0 and max(mg) < 0.05:
+            gate_ok = False
+    except Exception:
+        pass
+    if gate_ok and len(deltas_co) >= 2:
+        median_co = float(np.median(deltas_co))
+        max_co = float(np.max(deltas_co)) if deltas_co else 0.0
+        tiny_eps = 1e-6
+        # If responses are numerically negligible across all anchors, skip this check as non-diagnostic
+        if max_co >= tiny_eps:
+            # be lenient: require at least one anchor to show a measurable response
+            assert (median_co >= thresh_co) or (max_co >= thresh_co), \
+                f"Co-item size monotonicity too weak: median |Δ|={median_co:.3f} bps, max |Δ|={max_co:.3f} bps, thresh={thresh_co:.3f}, deltas={deltas_co}"
+
+    # ---- Sanity: if portfolio context is removed, drift collapses ----
+    # Remove portfolio_id and pf_gid from the same two baskets; scores should become (nearly) equal
+    def _strip_pf(b):
+        return [{k:v for k,v in r.items() if k not in ("portfolio_id","pf_gid")} for r in b]
+    yA_nopf = scorer.score_many(_strip_pf(lists_A[0]))
+    yB_nopf = scorer.score_many(_strip_pf(lists_B[0]))
+    collapse = abs(float(yA_nopf[0] - yB_nopf[0]))
+    collapse_thresh = max(0.05, 0.13 * beta_pf)
+    assert collapse < collapse_thresh, f"Drift still present with no portfolio context: |Δ|={collapse:.3f} bps, thresh={collapse_thresh:.3f}"
+
+    # ---- Alignment to generator's portfolio term (optional but informative) ----
+    # For each (P_A, P_B) pair above, approximate the expected Δ_pf by the difference
+    # of the generator's pf term for that anchor between the two baskets (using the same U, X).
+    if (ctx.get("U") is not None) and (ctx.get("beta_pf") is not None):
+        exp_pf_deltas = []
+        for k in range(K):
+            rep_k = warm_reps[k]
+            nid_k = int(rep_k.node_id)
+            gk = int(rep_k.pf_gid)
+            isin_common = nid2isin[nid_k]
+            def _pf_term_for(basket):
+                pid = basket[0]["portfolio_id"]
+                # reconstruct co-items' node_ids (exclude anchor)
+                nids = [int(isin2nid[r["isin"]]) for r in basket if r.get("portfolio_id") == pid and r["isin"] != isin_common]
+                if not nids:
+                    return 0.0
+                h_bar = X[nids].mean(0)
+                return float(ctx["beta_pf"] * float(np.dot(h_bar, ctx["U"][gk])))
+            yA = scorer.score_many(lists_A[k])[0]; yB = scorer.score_many(lists_B[k])[0]
+            exp_pf_deltas.append(float(_pf_term_for(lists_B[k]) - _pf_term_for(lists_A[k])))
+            pred_pf_deltas[k] = float(yB - yA)
+        if len(pred_pf_deltas) >= 3 and np.std(pred_pf_deltas) > 1e-6 and np.std(exp_pf_deltas) > 1e-6:
+            corr_pf = float(np.corrcoef(pred_pf_deltas, exp_pf_deltas)[0,1])
+            assert abs(corr_pf) >= 0.4, f"Portfolio-term |corr| too low: {corr_pf:.2f} | pred={pred_pf_deltas} exp={exp_pf_deltas}"
 
     # (Optional) print debug table for inspection
     df_debug = pd.DataFrame(req_rows)

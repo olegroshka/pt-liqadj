@@ -94,13 +94,16 @@ def test_runtime_port_ctx_is_built_and_used(tmp_path: Path, model_dir: str):
     port_len_2 = kw2["port_ctx"]["port_len"].detach().cpu().tolist()
     assert port_len_2 == [len(P2)], f"port_len should equal number of items in P2, got {port_len_2}"
 
-    # Case C: if explicit pf_gid is supplied, runtime grouping should NOT be built
-    P3 = [dict(r, pf_gid=7) for r in P1]  # explicit override
+    # Case C: if explicit pf_gid is supplied, runtime dynamic port_ctx should still be built
+    P3 = [dict(r, pf_gid=7) for r in P1]  # explicit override (single group id)
     _ = scorer.score_many(P3)
     kw3 = cap.last_kwargs
     assert kw3["pf_gid"] is not None
-    assert (kw3["port_ctx"] is scorer.port_ctx) or (kw3["port_ctx"] is None), \
-        "Explicit pf_gid should use training port_ctx (or None), not runtime"
+    pf3 = kw3["pf_gid"].detach().cpu().tolist()
+    assert set(pf3) == {7}, f"pf_gid should respect explicit values, got {pf3}"
+    assert kw3["port_ctx"] is not None, "Expected dynamic port_ctx even when explicit pf_gid is provided"
+    port_len_3 = kw3["port_ctx"]["port_len"].detach().cpu().tolist()
+    assert port_len_3 == [len(P3)], f"port_len should equal number of items in P3, got {port_len_3}"
 
 
 def test_portfolio_id_string_is_ignored_for_representation(tmp_path: Path):

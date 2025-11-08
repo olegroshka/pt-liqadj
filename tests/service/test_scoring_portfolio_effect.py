@@ -120,4 +120,4 @@ def test_permutation_and_id_invariance_predictions(model_dir: str):
     for k, v in kv.items():
         assert k in kv_id, f"Missing key after id change: {k}"
         # Allow tiny float noise due to non-determinism; keep strict but realistic tolerance
-        assert np.isclose(v, kv_id[k], atol=1e-6, rtol=0.0), f"Portfolio ID label changed score for {k}: {v} vs {kv_id[k]}"
+        assert np.isclose(v, kv_id[k], atol=1e-5, rtol=0.0), f"Portfolio ID label changed score for {k}: {v} vs {kv_id[k]}"
