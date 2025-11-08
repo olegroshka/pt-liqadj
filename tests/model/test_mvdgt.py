@@ -1,5 +1,5 @@
 import torch
-from ptliq.model.mv_dgt import MultiViewDGT
+from ptliq.model.mv_dgt import MultiViewDGT, compute_nodewise_portfolio_vectors_loo
 
 
 def _toy_masks(E):
@@ -50,26 +50,26 @@ def test_mvdgt_forward_shapes_and_no_nan():
     assert yhat.shape == (len(anchor),)
     assert torch.isfinite(yhat).all()
 
-
-def test_portfolio_vectors_weighted_sum():
-    torch.manual_seed(0)
-    # craft a hidden matrix H with known rows
-    H = torch.tensor([[1.,0.],[0.,1.],[1.,1.],[2.,1.]], dtype=torch.float32)
-    # portfolio group with nodes [1,3] weights [0.25, 0.75]
-    port_ctx = {
-        'port_nodes_flat': torch.tensor([1,3], dtype=torch.long),
-        'port_w_signed_flat': torch.tensor([0.25, 0.75], dtype=torch.float32),
-        'port_offsets': torch.tensor([0], dtype=torch.long),
-        'port_len': torch.tensor([2], dtype=torch.long),
-    }
-    masks = {'struct': torch.zeros(4, dtype=torch.bool), 'port': torch.zeros(4, dtype=torch.bool),
-             'corr_global': torch.zeros(4, dtype=torch.bool), 'corr_local': torch.zeros(4, dtype=torch.bool)}
-    # minimal model for calling helper
-    model = MultiViewDGT(x_dim=2, hidden=2, heads=1, dropout=0.0,
-                         view_masks=masks, edge_index=torch.zeros(2,4, dtype=torch.long))
-    pf_gid = torch.tensor([0, -1], dtype=torch.long)
-    out = model._portfolio_vectors(H, pf_gid, port_ctx)
-    # expected: 0.25*[0,1] + 0.75*[2,1] = [1.5, 1.0]
-    exp0 = torch.tensor([1.5, 1.0])
-    assert torch.allclose(out[0], exp0, atol=1e-6)
-    assert torch.allclose(out[1], torch.zeros(2), atol=1e-6)
+#portfolio_vectors is legacy now - commented out this test
+# def test_portfolio_vectors_weighted_sum():
+#     torch.manual_seed(0)
+#     # craft a hidden matrix H with known rows
+#     H = torch.tensor([[1.,0.],[0.,1.],[1.,1.],[2.,1.]], dtype=torch.float32)
+#     # portfolio group with nodes [1,3] weights [0.25, 0.75]
+#     port_ctx = {
+#         'port_nodes_flat': torch.tensor([1,3], dtype=torch.long),
+#         'port_w_signed_flat': torch.tensor([0.25, 0.75], dtype=torch.float32),
+#         'port_offsets': torch.tensor([0], dtype=torch.long),
+#         'port_len': torch.tensor([2], dtype=torch.long),
+#     }
+#     masks = {'struct': torch.zeros(4, dtype=torch.bool), 'port': torch.zeros(4, dtype=torch.bool),
+#              'corr_global': torch.zeros(4, dtype=torch.bool), 'corr_local': torch.zeros(4, dtype=torch.bool)}
+#     # minimal model for calling helper
+#     model = MultiViewDGT(x_dim=2, hidden=2, heads=1, dropout=0.0,
+#                          view_masks=masks, edge_index=torch.zeros(2,4, dtype=torch.long))
+#     pf_gid = torch.tensor([0, -1], dtype=torch.long)
+#     out = model._portfolio_vectors(H, pf_gid, port_ctx)
+#     # expected: 0.25*[0,1] + 0.75*[2,1] = [1.5, 1.0]
+#     exp0 = torch.tensor([1.5, 1.0])
+#     assert torch.allclose(out[0], exp0, atol=1e-6)
+#     assert torch.allclose(out[1], torch.zeros(2), atol=1e-6)

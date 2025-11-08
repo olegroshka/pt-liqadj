@@ -16,6 +16,8 @@
   "attn_log_every": 200,
   "portfolio_sim_weight": 0.0,
   "portfolio_jitter_std": 0.05,
+  "train_use_dynamic_port_ctx": false,
+  "train_signless_pf": true,
   "model": {
     "hidden": 192,
     "heads": 4,

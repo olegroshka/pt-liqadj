@@ -36,7 +36,7 @@
     "market_context": "/home/oleg/PycharmProjects/pt-liqadj/data/pyg/market_context.pt",
     "portfolio_context": "/home/oleg/PycharmProjects/pt-liqadj/data/pyg/portfolio_context.pt",
     "samples": "/home/oleg/PycharmProjects/pt-liqadj/data/mvdgt/exp001/samples.parquet",
-    "view_masks": "/home/oleg/PycharmProjects/pt-liqadj/data/mvdgt/exp001/view_masks.pt",
+    "view_masks": "models/dgt_demo/view_masks.pt",
     "market_index": "/home/oleg/PycharmProjects/pt-liqadj/data/pyg/market_index.parquet"
   }
 }

@@ -224,3 +224,34 @@
 2025-11-07 01:41:34 | INFO | epoch 019 train_mae=3.6008 train_rmse=4.5293 val_mae=3.8224 val_rmse=4.7480
 2025-11-07 01:41:35 | INFO | epoch 020 train_mae=3.6051 train_rmse=4.5530 val_mae=3.8179 val_rmse=4.7427
 2025-11-07 01:41:35 | INFO | [TEST] RMSE = 4.2417 | MAE = 3.4054 | MSE = 17.9920
+2025-11-08 21:33:13 | INFO | training_config={"workdir": "data/mvdgt/exp001", "pyg_dir": "data/pyg", "outdir": "models/dgt_demo", "epochs": 20, "lr": 0.001, "weight_decay": 0.0001, "batch_size": 1024, "seed": 17, "device": "cuda", "enable_tb": true, "tb_log_dir": "models/dgt_demo/tb", "enable_tqdm": true, "log_every": 50, "enable_attn_tb": false, "attn_log_every": 200, "portfolio_sim_weight": 0.0, "portfolio_jitter_std": 0.05, "train_use_dynamic_port_ctx": false, "train_signless_pf": true, "model": {"hidden": 192, "heads": 4, "dropout": 0.1, "trade_dim": 2, "use_portfolio": true, "views": ["struct", "port", "corr_global", "corr_local"], "use_pf_head": true, "pf_head_hidden": 128, "use_portfolio_attn": true, "portfolio_attn_layers": 1, "portfolio_attn_heads": 4, "portfolio_attn_dropout": null, "portfolio_attn_hidden": null, "portfolio_attn_concat_trade": true, "portfolio_attn_concat_market": false, "portfolio_attn_mode": "residual", "portfolio_attn_gate_init": 0.0, "max_portfolio_len": null, "x_dim": null, "mkt_dim": null, "use_market": null}}
+2025-11-08 21:33:13 | INFO | market_context: available | mkt_feat shape=(90, 14) dtype=torch.float32 device=cuda:0
+2025-11-08 21:33:13 | INFO | market_context: mean=8.611089 std=24.718622
+2025-11-08 21:33:13 | INFO | portfolio_context: available | groups=170 line_items=1700 avg_len=10.00 min_len=10 max_len=10
+2025-11-08 21:33:13 | INFO | copied samples.parquet to outdir: models/dgt_demo/samples.parquet
+2025-11-08 21:33:13 | INFO | corr_gate = 0.268941
+2025-11-08 21:33:13 | INFO | num struct      edges = 64688
+2025-11-08 21:33:13 | INFO | num port        edges = 3956
+2025-11-08 21:33:13 | INFO | num corr_global edges = 25828
+2025-11-08 21:33:13 | INFO | num corr_local  edges = 24240
+2025-11-08 21:33:14 | INFO | epoch 001 train_mae=32.6159 train_rmse=35.0152 val_mae=30.8201 val_rmse=33.3276
+2025-11-08 21:33:16 | INFO | epoch 002 train_mae=25.4324 train_rmse=28.5660 val_mae=13.9744 val_rmse=16.9005
+2025-11-08 21:33:17 | INFO | epoch 003 train_mae=10.1218 train_rmse=12.6899 val_mae=6.0953 val_rmse=7.7201
+2025-11-08 21:33:18 | INFO | epoch 004 train_mae=4.6540 train_rmse=5.8708 val_mae=4.0693 val_rmse=5.1309
+2025-11-08 21:33:20 | INFO | epoch 005 train_mae=3.8444 train_rmse=4.8467 val_mae=3.6052 val_rmse=4.5495
+2025-11-08 21:33:21 | INFO | epoch 006 train_mae=3.6471 train_rmse=4.5736 val_mae=3.5751 val_rmse=4.5024
+2025-11-08 21:33:22 | INFO | epoch 007 train_mae=3.5937 train_rmse=4.5112 val_mae=3.5282 val_rmse=4.4356
+2025-11-08 21:33:24 | INFO | epoch 008 train_mae=3.5729 train_rmse=4.4844 val_mae=3.5647 val_rmse=4.4822
+2025-11-08 21:33:25 | INFO | epoch 009 train_mae=3.5644 train_rmse=4.4759 val_mae=3.5136 val_rmse=4.4138
+2025-11-08 21:33:26 | INFO | epoch 010 train_mae=3.5520 train_rmse=4.4590 val_mae=3.4824 val_rmse=4.3714
+2025-11-08 21:33:28 | INFO | epoch 011 train_mae=3.5467 train_rmse=4.4506 val_mae=3.4750 val_rmse=4.3628
+2025-11-08 21:33:29 | INFO | epoch 012 train_mae=3.5499 train_rmse=4.4639 val_mae=3.4954 val_rmse=4.3866
+2025-11-08 21:33:30 | INFO | epoch 013 train_mae=3.5398 train_rmse=4.4521 val_mae=3.4960 val_rmse=4.3882
+2025-11-08 21:33:32 | INFO | epoch 014 train_mae=3.5271 train_rmse=4.4305 val_mae=3.4856 val_rmse=4.3723
+2025-11-08 21:33:33 | INFO | epoch 015 train_mae=3.5358 train_rmse=4.4487 val_mae=3.4962 val_rmse=4.3882
+2025-11-08 21:33:34 | INFO | epoch 016 train_mae=3.5138 train_rmse=4.4246 val_mae=3.4784 val_rmse=4.3634
+2025-11-08 21:33:36 | INFO | epoch 017 train_mae=3.5090 train_rmse=4.4157 val_mae=3.4807 val_rmse=4.3666
+2025-11-08 21:33:37 | INFO | epoch 018 train_mae=3.5333 train_rmse=4.4429 val_mae=3.4928 val_rmse=4.3843
+2025-11-08 21:33:38 | INFO | epoch 019 train_mae=3.5138 train_rmse=4.4248 val_mae=3.4896 val_rmse=4.3793
+2025-11-08 21:33:40 | INFO | epoch 020 train_mae=3.5311 train_rmse=4.4541 val_mae=3.4888 val_rmse=4.3782
+2025-11-08 21:33:40 | INFO | [TEST] RMSE = 4.4243 | MAE = 3.5359 | MSE = 19.5749
