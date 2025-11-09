@@ -791,6 +791,13 @@ def _prepare_market_preproc_tensors(samp: pd.DataFrame, mkt_ctx: Optional[dict],
         pre = _compute_market_preproc(samp, mkt_ctx, logger)
         if pre is not None:
             try:
+                # Mark that downstream scorers should apply this preprocessing.
+                try:
+                    pre = dict(pre)
+                except Exception:
+                    pass
+                if isinstance(pre, dict):
+                    pre.setdefault("apply", True)
                 (outdir / "market_preproc.json").write_text(json.dumps(pre, indent=2))
             except Exception:
                 logger.warning("failed to write market_preproc.json")

@@ -608,11 +608,12 @@ def _to_date(x: Any):
 from collections import defaultdict
 
 def _normalize_weights(abs_weights: np.ndarray) -> np.ndarray:
-    s = float(np.sum(abs_weights))
+    # use float64 accumulator for determinism across permutations
+    s = float(np.sum(abs_weights, dtype=np.float64))
     if s <= 0.0 or not np.isfinite(s):
         n = int(abs_weights.size)
         return np.full(n, 1.0 / max(1, n), dtype=np.float32)
-    return (abs_weights / s).astype(np.float32)
+    return (abs_weights.astype(np.float64) / s).astype(np.float32)
 
 
 def _build_runtime_port_ctx(
@@ -657,15 +658,18 @@ def _build_runtime_port_ctx(
     pf_gid = np.full(len(rows), -1, dtype=np.int64)
 
     for g_idx, (_pid, items) in enumerate(ordered):
-        abs_vec = np.array([a for (_, _, a, _) in items], dtype=np.float32)
-        sgn_vec = np.array([s for (_, _, _, s) in items], dtype=np.float32)
+        # stable within-group ordering for determinism across permutations:
+        # sort by (node_id, abs_size desc, signed_size desc, row_idx)
+        items_sorted = sorted(items, key=lambda t: (t[1], -t[2], -t[3]))
+        abs_vec = np.array([a for (_, _, a, _) in items_sorted], dtype=np.float32)
+        sgn_vec = np.array([s for (_, _, _, s) in items_sorted], dtype=np.float32)
         w_abs = _normalize_weights(abs_vec)
-        denom = float(abs_vec.sum())
+        denom = float(np.sum(abs_vec, dtype=np.float64))
         if denom <= 0.0 or not np.isfinite(denom):
-            denom = float(len(items)) if len(items) > 0 else 1.0
-        w_sgn = (sgn_vec / denom).astype(np.float32)
-        port_len.append(len(items))
-        for (row_idx, nid, _a, _s), wA, wS in zip(items, w_abs, w_sgn):
+            denom = float(len(items_sorted)) if len(items_sorted) > 0 else 1.0
+        w_sgn = (sgn_vec.astype(np.float64) / denom).astype(np.float32)
+        port_len.append(len(items_sorted))
+        for (row_idx, nid, _a, _s), wA, wS in zip(items_sorted, w_abs, w_sgn):
             port_nodes.append(nid)
             port_w_abs.append(float(wA))
             port_w_sgn.append(float(wS))
@@ -756,7 +760,8 @@ class DGTScorer:
     """
     def __init__(self, workdir: Path | str, device: Optional[str] = None):
         self.workdir = Path(workdir)
-        dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        # Default to CPU for deterministic parity with test direct path; caller can override.
+        dev = device or "cpu"
         self.device = torch.device(dev)
 
         # minimal bundle for API compatibility
@@ -923,21 +928,23 @@ class DGTScorer:
         if port_ctx_path and Path(port_ctx_path).exists():
             self.port_ctx = torch.load(port_ctx_path, map_location=self.device)
         
-        # Optional market preprocessing (z-score + orientation sign)
+        # Optional market preprocessing (z-score + orientation sign) — gated by explicit 'apply' flag for backward compatibility
         self._mkt_mean = None
         self._mkt_std = None
         self._mkt_sign = 1.0
+        self._mkt_apply = False
         try:
             preproc_path = self.workdir / "market_preproc.json"
             if preproc_path.exists():
                 pre = json.loads(preproc_path.read_text())
+                self._mkt_apply = bool(pre.get("apply", False))
                 self._mkt_mean = torch.tensor(pre.get("mean", []), dtype=torch.float32, device=self.device)
                 std_vals = [float(v) if (v is not None and float(v) > 0.0) else 1.0 for v in pre.get("std", [])]
                 self._mkt_std = torch.tensor(std_vals, dtype=torch.float32, device=self.device)
                 self._mkt_sign = float(pre.get("sign", 1.0))
         except Exception:
             # fall back silently if unavailable
-            self._mkt_mean, self._mkt_std, self._mkt_sign = None, None, 1.0
+            self._mkt_mean, self._mkt_std, self._mkt_sign, self._mkt_apply = None, None, 1.0, False
         
         # Build a node_id -> pf_gid map from training portfolio context (if available)
         self._node_to_pfgid: dict[int, int] = {}
@@ -1018,11 +1025,12 @@ class DGTScorer:
         return cls(workdir=workdir, device=device)
 
     @torch.no_grad()
+    @torch.no_grad()
     def score_many(self, rows: List[Dict[str, Any]]) -> np.ndarray:
         if not rows:
             return np.zeros((0,), dtype=np.float32)
 
-        # map isins
+        # --- node ids
         node_ids = []
         for r in rows:
             isin = str(r.get("isin", "")).strip()
@@ -1031,97 +1039,75 @@ class DGTScorer:
             node_ids.append(self._isin_to_node[isin])
         anchor_idx = torch.as_tensor(node_ids, dtype=torch.long, device=self.device)
 
-        # trade features (raw → standardized using train-time scaler.json)
+        # --- trade features (standardized with train-time scaler.json)
         side = [_side_sign(r.get("side")) for r in rows]
-        lsz = [_log_size(r.get("size")) for r in rows]
-        side_t = torch.as_tensor(side, device=self.device, dtype=torch.float32)
-        lsz_t = torch.as_tensor(lsz, device=self.device, dtype=torch.float32)
+        lsz  = [_log_size(r.get("size")) for r in rows]
+        side_t = torch.as_tensor(side, dtype=torch.float32, device=self.device)
+        lsz_t  = torch.as_tensor(lsz,  dtype=torch.float32, device=self.device)
+
+        # align to saved feature_names (impute means for any unknown names)
         n = side_t.size(0)
-        feat_tensors = []
+        feat_cols = []
         for i, name in enumerate(self.bundle.feature_names):
             if name == "side_sign":
-                t = side_t
+                feat_cols.append(side_t)
             elif name == "log_size":
-                t = lsz_t
+                feat_cols.append(lsz_t)
             else:
-                # Unknown feature name: impute with scaler mean for that slot
-                t = torch.full((n,), float(self._scaler_mean[i].item()), device=self.device, dtype=torch.float32)
-            feat_tensors.append(t)
-        raw = torch.stack(feat_tensors, dim=1) if feat_tensors else torch.zeros((n, 0), device=self.device)
+                feat_cols.append(torch.full((n,), float(self._scaler_mean[i].item()),
+                                            dtype=torch.float32, device=self.device))
+        raw   = torch.stack(feat_cols, dim=1) if feat_cols else torch.zeros((n,0), device=self.device)
         denom = torch.where(self._scaler_std <= 0, torch.ones_like(self._scaler_std), self._scaler_std)
-        trade = (raw - self._scaler_mean) / denom
-        trade = torch.nan_to_num(trade, nan=0.0, posinf=0.0, neginf=0.0)
+        trade = torch.nan_to_num((raw - self._scaler_mean) / denom, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # market slice (exact match first, else nearest prior)
+        # --- market (apply z-score + orientation sign if available, matching direct path)
         market_feat = None
         if self.mkt_ctx is not None:
             idxs: List[int] = []
             last_idx = int(self.mkt_ctx["mkt_feat"].size(0) - 1)
             dates_index = getattr(self, "_mkt_dates", None)
-            idx_arr = getattr(self, "_mkt_idxs", None)
+            idx_arr     = getattr(self, "_mkt_idxs",  None)
             for r in rows:
                 ts = _to_date(r.get("asof_date"))
                 if (ts is None) or (self.mkt_lookup is None):
                     idxs.append(last_idx)
-                    continue
-                if ts in self.mkt_lookup:
+                elif ts in self.mkt_lookup:
                     idxs.append(int(self.mkt_lookup[ts]))
-                    continue
-                if (dates_index is None) or (idx_arr is None) or (len(idx_arr) == 0):
+                elif (dates_index is None) or (idx_arr is None) or (len(idx_arr) == 0):
                     idxs.append(last_idx)
                 else:
                     pos = int(dates_index.searchsorted(ts, side="right") - 1)
                     pos = max(0, min(pos, len(idx_arr) - 1))
                     idxs.append(int(idx_arr[pos]))
-            di = torch.as_tensor(idxs, dtype=torch.long, device=self.device)
-            market_feat = self.mkt_ctx["mkt_feat"].index_select(0, di)
-            # apply z-score and orientation sign if available (train/serve parity)
-            if (getattr(self, "_mkt_mean", None) is not None) and (getattr(self, "_mkt_std", None) is not None):
-                denom = torch.where(self._mkt_std <= 0, torch.ones_like(self._mkt_std), self._mkt_std)
-                market_feat = (market_feat - self._mkt_mean) / denom
+            market_feat = self.mkt_ctx["mkt_feat"].index_select(0, torch.as_tensor(idxs, dtype=torch.long, device=self.device))
+            # z-score and orientation sign (if preproc artifacts are present)
+            if self._mkt_apply and (self._mkt_mean is not None) and (self._mkt_std is not None):
+                denom_m = torch.where(self._mkt_std <= 0, torch.ones_like(self._mkt_std), self._mkt_std)
+                market_feat = (market_feat - self._mkt_mean) / denom_m
                 market_feat = torch.nan_to_num(market_feat, nan=0.0, posinf=0.0, neginf=0.0)
-                try:
-                    market_feat = market_feat * float(getattr(self, "_mkt_sign", 1.0))
-                except Exception:
-                    pass
+                if getattr(self, "_mkt_sign", None) is not None:
+                    market_feat = market_feat * float(self._mkt_sign)
 
-        # --- Portfolio context & pf_gid selection (prefer dynamic per-request context)
-        any_explicit = any(("pf_gid" in r) and (r["pf_gid"] is not None) for r in rows)
+        # --- portfolio context: ONLY if the request provides pf info
+        any_pf_gid = any(("pf_gid" in r) and (r["pf_gid"] is not None) for r in rows)
+        any_pid    = any((r.get("portfolio_id") is not None) for r in rows)
         port_ctx = None
-        pf_gid = None
-        if any_explicit:
-            # Use provided pf_gid vector
-            pf_list: List[int] = []
+        pf_gid   = None
+        if any_pf_gid:
+            # explicit pf_gid vector from request
+            pf_list = []
             for r in rows:
-                v = r.get("pf_gid", -1)
-                try:
-                    pf_list.append(int(v))
-                except Exception:
-                    pf_list.append(-1)
+                try: pf_list.append(int(r.get("pf_gid", -1)))
+                except Exception: pf_list.append(-1)
             pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
-            # Build dynamic port_ctx to match explicit groups if possible
-            try:
-                port_ctx = _build_runtime_port_ctx_from_explicit_gid(rows, node_ids, self.device)
-            except NameError:
-                port_ctx = None
-            if port_ctx is None:
-                # fallback: try grouping by portfolio_id
-                _ctx2, _pf2 = _build_runtime_port_ctx(rows, node_ids, self.device)
-                port_ctx = _ctx2
-                # keep pf_gid from request as authoritative
-        else:
-            # No explicit pf_gid; try runtime grouping by portfolio_id
-            runtime_port_ctx, runtime_pf_gid = _build_runtime_port_ctx(rows, node_ids, self.device)
-            if runtime_port_ctx is not None:
-                port_ctx = runtime_port_ctx
-                pf_gid = runtime_pf_gid
-            else:
-                # fallback to training-derived gids and context
-                pf_list: List[int] = []
-                for nid in node_ids:
-                    pf_list.append(int(self._node_to_pfgid.get(int(nid), -1)))
-                pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
-                port_ctx = self.port_ctx
+            port_ctx = _build_runtime_port_ctx_from_explicit_gid(rows, node_ids, self.device)
+            if (port_ctx is None) and any_pid:
+                # fall back to runtime grouping by portfolio_id
+                port_ctx, pf_gid = _build_runtime_port_ctx(rows, node_ids, self.device)
+        elif any_pid:
+            # runtime grouping by portfolio_id
+            port_ctx, pf_gid = _build_runtime_port_ctx(rows, node_ids, self.device)
+        # else: keep portfolio path OFF (pf_gid=None, port_ctx=None)
 
         yhat = self.model(
             self.x,
@@ -1131,7 +1117,5 @@ class DGTScorer:
             port_ctx=port_ctx,
             trade_feat=trade,
         )
-        y = yhat.detach().cpu().numpy().astype(np.float32)
-        y = y.reshape(-1)
-        y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-        return y
+        y = yhat.detach().cpu().numpy().astype(np.float32).reshape(-1)
+        return np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
