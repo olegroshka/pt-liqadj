@@ -1097,8 +1097,10 @@ class DGTScorer:
             # explicit pf_gid vector from request
             pf_list = []
             for r in rows:
-                try: pf_list.append(int(r.get("pf_gid", -1)))
-                except Exception: pf_list.append(-1)
+                try:
+                    pf_list.append(int(r.get("pf_gid", -1)))
+                except Exception:
+                    pf_list.append(-1)
             pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
             port_ctx = _build_runtime_port_ctx_from_explicit_gid(rows, node_ids, self.device)
             if (port_ctx is None) and any_pid:

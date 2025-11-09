@@ -408,14 +408,14 @@ def _direct_predict(outdir: Path, req_rows: list[dict], masks_path: Path | None 
         s = str(v).strip().upper()
         return 1.0 if s in {"B","BUY","CBUY","TRUE","1"} else (-1.0 if s in {"S","SELL","CSELL","FALSE","0","-1"} else 0.0)
 
-    def _build_port_ctx_from_groups(groups: dict, use_keys_sorted=True):
-        keys = sorted(groups.keys()) if use_keys_sorted else list(groups.keys())
-        port_nodes = []
-        port_w_abs = []
-        port_w_sgn = []
-        port_len = []
-        for g in keys:
-            idxs = groups[g]
+    def _build_port_ctx_from_groups(groups: dict, return_gid: bool = False):
+        # groups: key -> list of row indices
+        keys = sorted(groups.keys())
+        key_to_gid = {k: i for i, k in enumerate(keys)}
+
+        port_nodes, port_w_abs, port_w_sgn, port_len = [], [], [], []
+        for k in keys:
+            idxs = groups[k]
             abs_sizes = []
             sgn_sizes = []
             for i in idxs:
@@ -428,27 +428,37 @@ def _direct_predict(outdir: Path, req_rows: list[dict], masks_path: Path | None 
                 s = (1.0 if side >= 0 else -1.0) * a
                 abs_sizes.append(a)
                 sgn_sizes.append(s)
-            abs_arr = np.asarray(abs_sizes, dtype=np.float32)
-            sgn_arr = np.asarray(sgn_sizes, dtype=np.float32)
-            denom = float(abs_arr.sum())
-            if denom <= 0.0 or not np.isfinite(denom):
-                denom = float(len(abs_arr)) if len(abs_arr) > 0 else 1.0
-            w_abs = (abs_arr / denom).astype(np.float32)
-            w_sgn = (sgn_arr / denom).astype(np.float32)
+            denom = float(sum(abs_sizes)) or float(len(abs_sizes)) or 1.0
+            w_abs = [a / denom for a in abs_sizes]
+            w_sgn = [s / denom for s in sgn_sizes]
             port_len.append(len(idxs))
             for i, wA, wS in zip(idxs, w_abs, w_sgn):
                 port_nodes.append(int(node_ids[i]))
                 port_w_abs.append(float(wA))
                 port_w_sgn.append(float(wS))
-        return {
+
+        ctx = {
             "port_nodes_flat": torch.tensor(port_nodes, dtype=torch.long, device=device),
             "port_w_abs_flat": torch.tensor(port_w_abs, dtype=torch.float32, device=device),
             "port_w_signed_flat": torch.tensor(port_w_sgn, dtype=torch.float32, device=device),
             "port_len": torch.tensor(port_len, dtype=torch.long, device=device),
         }
 
+        if not return_gid:
+            return ctx
+
+        # Align pf_gid to these runtime groups (by portfolio_id if present)
+        pf_gid_rt = []
+        for r in req_rows:
+            pid = r.get("portfolio_id")
+            pf_gid_rt.append(int(key_to_gid.get(pid, -1)))
+        pf_gid_rt = torch.as_tensor(pf_gid_rt, dtype=torch.long, device=device)
+        return ctx, pf_gid_rt
+
     # precedence: explicit pf_gid → build dynamic ctx; else portfolio_id → build dynamic; else training port_ctx
     any_pid = any((r.get("portfolio_id") is not None) for r in req_rows)
+    runtime_ctx_from_pid = False
+    runtime_ctx_from_explicit = False
     if any_explicit:
         groups = {}
         for i, r in enumerate(req_rows):
@@ -458,7 +468,21 @@ def _direct_predict(outdir: Path, req_rows: list[dict], masks_path: Path | None 
                 g = -1
             if g >= 0:
                 groups.setdefault(g, []).append(i)
-        port_ctx = _build_port_ctx_from_groups(groups) if groups else None
+        if groups:
+            keys = sorted(groups.keys())
+            key_to_gid = {k: i for i, k in enumerate(keys)}
+            pf_list_remap = []
+            for r in req_rows:
+                try:
+                    g = int(r.get("pf_gid", -1))
+                except Exception:
+                    g = -1
+                pf_list_remap.append(int(key_to_gid.get(g, -1)))
+            pf_gid = torch.as_tensor(pf_list_remap, dtype=torch.long, device=device)
+            port_ctx = _build_port_ctx_from_groups(groups)
+            runtime_ctx_from_explicit = True
+        else:
+            port_ctx = None
     elif any_pid:
         groups = {}
         for i, r in enumerate(req_rows):
@@ -466,7 +490,11 @@ def _direct_predict(outdir: Path, req_rows: list[dict], masks_path: Path | None 
             if pid is None:
                 continue
             groups.setdefault(pid, []).append(i)
-        port_ctx = _build_port_ctx_from_groups(groups) if groups else None
+        if groups:
+            port_ctx, pf_gid = _build_port_ctx_from_groups(groups, return_gid=True)
+            runtime_ctx_from_pid = True
+        else:
+            port_ctx = None
     # else: keep training port_ctx as loaded above
 
     # optional ablation: disable portfolio context entirely
@@ -523,6 +551,11 @@ def _direct_predict(outdir: Path, req_rows: list[dict], masks_path: Path | None 
             market_feat = torch.nan_to_num(market_feat, nan=0.0, posinf=0.0, neginf=0.0)
             if mkt_sign is not None:
                 market_feat = market_feat * float(mkt_sign)
+
+    # consistency guard: pf_gid must index into the runtime port_ctx when both are provided
+    if (port_ctx is not None) and (pf_gid is not None) and (runtime_ctx_from_pid or runtime_ctx_from_explicit):
+        G = int(port_ctx["port_len"].numel())
+        assert ((pf_gid >= 0) & (pf_gid < G)).all(), "pf_gid must index into runtime port_ctx"
 
     with torch.no_grad():
         yhat = model(x, anchor_idx=anchor_idx, market_feat=market_feat,
