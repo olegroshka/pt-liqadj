@@ -63,6 +63,7 @@ ptliq-train = "ptliq.cli.gat_train:app"
 ptliq-gat-train = "ptliq.cli.gat_train:app"
 ptliq-start-tensorboard = "ptliq.cli.tensorboard:app"
 ptliq-stop-tensorbord = "ptliq.cli.tensorboard_stop:app"
+ptliq-paper = "ptliq.cli.paper:main"
 
 
 [tool.setuptools.packages.find]

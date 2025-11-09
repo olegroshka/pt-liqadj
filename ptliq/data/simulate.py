@@ -59,6 +59,8 @@ class SimParams:
     providers: List[str]
     seed: int
     outdir: Path
+    # Portfolio constraints
+    unique_isin_per_pt: bool = True
 
     # Pricing / reference price controls (kept from prior version)
     par: float = 100.0
@@ -485,18 +487,20 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
         approx_port_lines = min(approx_port_lines, n_total)
         used = set()
 
-        # basket sizes
+        # basket sizes and targets
         baskets: List[List[int]] = []
+        basket_targets: List[int] = []
         remaining = approx_port_lines
         while remaining >= params.basket_size_min:
             bsize = int(rng.integers(params.basket_size_min, params.basket_size_max + 1))
             if bsize > remaining:
-                bsize = remaining
+                bsize = int(remaining)
             baskets.append([])
+            basket_targets.append(int(bsize))
             remaining -= bsize
 
         # fill baskets with similarity by sector/rating/curve
-        for b in baskets:
+        for b_id, b in enumerate(baskets):
             candidates = [i for i in range(n_total) if i not in used]
             if not candidates:
                 break
@@ -516,15 +520,34 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 s += 0.2 * (1.0 if bb["curve_bucket_fine"] == seed_b["curve_bucket_fine"] else 0.0)
                 return s
 
-            need = max(len(b) + int(rng.integers(1, 3)) - 1, 0)  # small variability
-            need = max(need, 0)
-            need_target = max(0, min(params.basket_size_max, len(b) + (params.basket_size_min - 1)))
-            pool_sorted = sorted(pool, key=score, reverse=True)[:max(need_target, 1) * 4]
+            # target size for this basket from configured range
+            need_target = int(basket_targets[b_id]) if b_id < len(basket_targets) else int(params.basket_size_min)
+            pool_sorted = sorted(pool, key=score, reverse=True)
+            # enforce unique ISIN per portfolio if requested
+            isins_in_b = set(todays_isins[idx] for idx in b)
             for i_idx in pool_sorted:
                 if len(b) >= need_target:
                     break
+                cand_isin = todays_isins[i_idx]
+                if params.unique_isin_per_pt and cand_isin in isins_in_b:
+                    continue
                 if i_idx not in used:
-                    used.add(i_idx); b.append(i_idx)
+                    used.add(i_idx)
+                    b.append(i_idx)
+                    isins_in_b.add(cand_isin)
+            # If still not enough to reach target, try any remaining candidates ignoring similarity
+            if len(b) < need_target:
+                fallback_pool = [i for i in range(n_total) if i not in used]
+                rng.shuffle(fallback_pool)
+                for i_idx in fallback_pool:
+                    if len(b) >= need_target:
+                        break
+                    cand_isin = todays_isins[i_idx]
+                    if params.unique_isin_per_pt and cand_isin in isins_in_b:
+                        continue
+                    used.add(i_idx)
+                    b.append(i_idx)
+                    isins_in_b.add(cand_isin)
 
         # index→basket id
         index_to_port: Dict[int, int] = {}

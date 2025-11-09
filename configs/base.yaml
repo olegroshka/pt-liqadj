@@ -15,6 +15,9 @@ data:
     n_bonds: 1000
     n_days: 90
     providers: [ "P1" ]
+#    basket_size_min: 30
+#    basket_size_max: 50
+#    unique_isin_per_pt: True
     seed: 42
 
   validation:

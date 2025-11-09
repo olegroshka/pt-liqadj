@@ -128,12 +128,25 @@ def main(
         v = _norm_cli(cli_value)
         return v if v is not None else _getattr_safe(sim_cfg, name, getattr(default_from, name))
 
+    # Determine basket size bounds from CLI overrides or config pt_size
+    _pt_size = _getattr_safe(sim_cfg, "pt_size", None)
+    _uniq_flag = bool(_getattr_safe(sim_cfg, "unique_isin_per_pt", True))
+    if basket_size_min is not None or basket_size_max is not None:
+        bs_min = int(basket_size_min if basket_size_min is not None else _getattr_safe(sim_cfg, "basket_size_min", _defaults.basket_size_min))
+        bs_max = int(basket_size_max if basket_size_max is not None else _getattr_safe(sim_cfg, "basket_size_max", _defaults.basket_size_max))
+    elif isinstance(_pt_size, (list, tuple)) and len(_pt_size) == 2:
+        bs_min, bs_max = int(_pt_size[0]), int(_pt_size[1])
+    else:
+        bs_min = int(_getattr_safe(sim_cfg, "basket_size_min", _defaults.basket_size_min))
+        bs_max = int(_getattr_safe(sim_cfg, "basket_size_max", _defaults.basket_size_max))
+
     params = SimParams(
         n_bonds=int(n_bonds),
         n_days=int(n_days),
         providers=list(providers),
         seed=int(sim_seed),
         outdir=Path(outdir),
+        unique_isin_per_pt=_uniq_flag,
 
         par=float(pick("par", par)),
         base_spread_bps=float(pick("base_spread_bps", base_spread_bps)),
@@ -158,8 +171,8 @@ def main(
         delta_noise_std=float(pick("delta_noise_std", delta_noise_std)),
 
         portfolio_trade_share=float(pick("portfolio_trade_share", portfolio_trade_share)),
-        basket_size_min=int(pick("basket_size_min", basket_size_min)),
-        basket_size_max=int(pick("basket_size_max", basket_size_max)),
+        basket_size_min=int(bs_min),
+        basket_size_max=int(bs_max),
         port_skew_mu=float(pick("port_skew_mu", port_skew_mu)),
         port_skew_sigma=float(pick("port_skew_sigma", port_skew_sigma)),
         port_time_spread_sec=int(pick("port_time_spread_sec", port_time_spread_sec)),

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import os
 import typer
 import torch
 import yaml
@@ -47,7 +46,7 @@ def app_main(
     weight_decay: float = typer.Option(1e-4),
     batch_size: int = typer.Option(512),
     seed: int = typer.Option(17),
-    device_str: str = typer.Option("cuda" if torch.cuda.is_available() else "cpu"),
+    device: str = typer.Option("auto", "--device", help="Device to use: 'auto'|'cpu'|'cuda' or 'cuda:{i}'. 'auto' chooses CUDA if available else CPU."),
     config: Path | None = typer.Option(None, help="Optional YAML config. If omitted, will try configs/mvdgt.default.yaml"),
     no_default_config: bool = typer.Option(False, help="Do not auto-load configs/mvdgt.default.yaml when --config is not provided."),
 ):
@@ -67,7 +66,15 @@ def app_main(
     weight_decay = float(_norm(weight_decay, 1e-4))
     batch_size = int(_norm(batch_size, 512))
     seed = int(_norm(seed, 17))
-    device_str = str(_norm(device_str, "cuda" if torch.cuda.is_available() else "cpu"))
+    device_in = str(_norm(device, "auto"))
+    # Resolve 'auto' and unavailable CUDA
+    dlow = device_in.lower()
+    if dlow == "auto":
+        resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+    elif dlow.startswith("cuda"):
+        resolved_device = device_in if torch.cuda.is_available() else "cpu"
+    else:
+        resolved_device = device_in
     outdir_opt = _norm(outdir, None)
     # Backward-compatible default: if outdir not provided, save under workdir
     outdir = Path(outdir_opt) if outdir_opt is not None else Path(workdir)
@@ -112,7 +119,7 @@ def app_main(
     cfg.weight_decay = weight_decay
     cfg.batch_size = batch_size
     cfg.seed = seed
-    cfg.device = device_str
+    cfg.device = resolved_device
     # Always set TB dir under outdir unless overridden by YAML
     if not cfg.tb_log_dir:
         cfg.tb_log_dir = str(outdir / "tb")

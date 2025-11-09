@@ -11,6 +11,9 @@ class SimConfig(BaseModel):
     n_days: int = Field(10, ge=1)
     providers: list[str] = Field(default_factory=lambda: ["P1", "P2"])
     seed: int = 42
+    # Portfolio sizing & uniqueness controls for simulate.py
+    pt_size: list[int] = Field(default_factory=lambda: [10, 35])
+    unique_isin_per_pt: bool = True
 
 class Paths(BaseModel):
     raw_dir: Path = Path("data/raw")

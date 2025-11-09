@@ -1,54 +1,69 @@
+# ptliq/cli/score.py  (PATCH: add DGTScorer path)
 from __future__ import annotations
-from pathlib import Path
+
+import argparse
 import json
-import pandas as pd
-import typer
-from rich import print
-from ptliq.service.scoring import MLPScorer
+from pathlib import Path
+from typing import Any, Dict, List
 
-app = typer.Typer(no_args_is_help=True)
+import numpy as np
 
-def _read_records(path: Path) -> list[dict]:
-    p = Path(path)
-    if p.suffix.lower() in [".jsonl", ".ndjson"]:
-        rows = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
-    elif p.suffix.lower() in [".json"]:
-        rows = json.loads(p.read_text())
-        if isinstance(rows, dict) and "rows" in rows:
-            rows = rows["rows"]
-    elif p.suffix.lower() in [".parquet"]:
-        df = pd.read_parquet(p)
-        rows = df.to_dict(orient="records")
-    else:
-        raise typer.BadParameter(f"Unsupported input type: {p.suffix}")
-    return rows
+from ptliq.service.scoring import DGTScorer, MLPScorer, GRUScorer  # ensure DGTScorer is imported
 
-@app.command()
-def app_main(
-    package: Path = typer.Option(..., help="model dir or model zip"),
-    input_path: Path = typer.Option(..., help="parquet | json | jsonl with f_* fields"),
-    output_path: Path = typer.Option(..., help="parquet|jsonl for predictions"),
-    device: str = typer.Option("auto"),
-):
-    """
-    Score a batch of rows offline. Rows must contain f_* features; missing values are imputed to the scaler mean.
-    """
-    scorer = MLPScorer.from_dir(package, device=device) if Path(package).is_dir() else MLPScorer.from_zip(package, device=device)
-    rows = _read_records(input_path)
-    y = scorer.score_many(rows)
 
-    out = Path(output_path); out.parent.mkdir(parents=True, exist_ok=True)
-    if out.suffix.lower() == ".parquet":
+def _read_rows(rows_json: str | None, rows_csv: str | None) -> List[Dict[str, Any]]:
+    if rows_json:
+        blob = json.loads(Path(rows_json).read_text())
+        if isinstance(blob, dict):
+            return [blob]
+        return list(blob)
+    if rows_csv:
         import pandas as pd
-        pd.DataFrame({"preds_bps": y}).to_parquet(out, index=False)
+        df = pd.read_csv(rows_csv)
+        return [r._asdict() if hasattr(r, "_asdict") else dict(r) for r in df.to_dict("records")]
+    raise ValueError("Provide --rows-json or --rows-csv")
+
+def _auto_model_type(model_dir: Path) -> str:
+    # Heuristic: MV-DGT runs contain mvdgt_meta.json and view_masks.pt
+    if (model_dir / "mvdgt_meta.json").exists() and (model_dir / "view_masks.pt").exists():
+        return "dgt"
+    # Fallbacks
+    if (model_dir / "config.json").exists() and (model_dir / "ckpt.pt").exists():
+        return "gru"
+    return "mlp"
+
+def main():
+    ap = argparse.ArgumentParser(prog="ptliq-score", description="Generic scorer for packaged models")
+    ap.add_argument("--model-dir", required=True)
+    ap.add_argument("--rows-json", default=None, help="Path to JSON array or single object")
+    ap.add_argument("--rows-csv", default=None, help="Path to CSV with columns")
+    ap.add_argument("--model-type", choices=["auto","dgt","gru","mlp"], default="auto")
+    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--out-csv", default=None)
+    args = ap.parse_args()
+
+    model_dir = Path(args.model_dir)
+    mtype = args.model_type if args.model_type != "auto" else _auto_model_type(model_dir)
+    rows = _read_rows(args.rows_json, args.rows_csv)
+
+    if mtype == "dgt":
+        scorer = DGTScorer.from_dir(model_dir, device=args.device)
+    elif mtype == "gru":
+        scorer = GRUScorer.from_dir(model_dir, device=args.device)
     else:
-        with open(out, "w", encoding="utf-8") as f:
-            for v in y:
-                f.write(json.dumps({"preds_bps": float(v)}) + "\n")
+        # MLP packaged zip/dir handled by MLPScorer; left as-is in your repo
+        from ptliq.service.scoring import MLPScorer
+        scorer = MLPScorer.from_dir(model_dir, device=args.device)
 
-    print(f"[bold green]SCORED[/bold green] {len(y)} rows → {out}")
-
-app = app
+    y = scorer.score_many(rows)
+    if args.out_csv:
+        import pandas as pd
+        out = pd.DataFrame(rows)
+        out["pred_bps"] = np.asarray(y, dtype=np.float32)
+        out.to_csv(args.out_csv, index=False)
+        print(f"Wrote {args.out_csv}")
+    else:
+        print(json.dumps(list(map(float, y))))
 
 if __name__ == "__main__":
-    app()
+    main()

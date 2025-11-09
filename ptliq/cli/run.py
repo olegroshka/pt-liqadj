@@ -175,7 +175,7 @@ def app_main(
 
         # models dir via env for trainer default
         os.environ["PTLIQ_DEFAULT_MODELS_DIR"] = str(models_dir)
-        _echo_cmd(f"ptliq-dgt-train --workdir {mvdgt_out} --pyg-dir {pyg_dir} --outdir {models_dir} --epochs {epochs} --lr {lr} --weight-decay {weight_decay} --batch-size {batch_size} --seed {seed} --device-str {device_str}")
+        _echo_cmd(f"ptliq-dgt-train --workdir {mvdgt_out} --pyg-dir {pyg_dir} --outdir {models_dir} --epochs {epochs} --lr {lr} --weight-decay {weight_decay} --batch-size {batch_size} --seed {seed} --device {device_str}")
         metrics = _mvdgt_train(_MVDGTTrainCfg(
             workdir=mvdgt_out,
             pyg_dir=pyg_dir,

@@ -969,10 +969,15 @@ class DGTScorer:
         # ISIN → node
         nodes_parq = self.meta["files"].get("graph_nodes")
         if not nodes_parq:
-            guess = pyg_graph_path.parent / "graph_nodes.parquet"
-            if not guess.exists():
-                raise FileNotFoundError("graph_nodes.parquet not found (meta['files']['graph_nodes'] missing and no adjacent file)")
-            nodes_parq = str(guess)
+            # Try adjacent to pyg graph, then sibling 'graph' folder
+            candidates = [pyg_graph_path.parent / "graph_nodes.parquet"]
+            candidates.append(pyg_graph_path.parent.parent / "graph" / "graph_nodes.parquet")
+            for c in candidates:
+                if c.exists():
+                    nodes_parq = str(c)
+                    break
+            if not nodes_parq:
+                raise FileNotFoundError("graph_nodes.parquet not found (checked adjacent to pyg and sibling 'graph' folder).")
         nodes = pd.read_parquet(nodes_parq)
         self._isin_to_node = {str(r.isin): int(r.node_id) for r in nodes.itertuples(index=False)}
 
