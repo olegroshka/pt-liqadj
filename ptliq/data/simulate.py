@@ -258,7 +258,9 @@ def _gen_bonds(n: int, seed: int) -> pd.DataFrame:
     today = date.today()
 
     # static
-    issuer_ids = rng.integers(1, 400, size=n)
+    # Limit the number of distinct issuers relative to n so baskets can include repeated issuers
+    max_issuers = max(5, int(n * 0.6))
+    issuer_ids = rng.integers(1, max_issuers + 1, size=n)
     sectors = rng.choice(SECTORS, size=n)
     ratings = rng.choice(RATINGS, size=n, p=[0.02, 0.10, 0.28, 0.35, 0.18, 0.07])
     coupons = rng.normal(3.2, 1.2, size=n).clip(0.5, 10.0)
@@ -515,6 +517,9 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
             def score(idx: int) -> float:
                 bb = bonds2.loc[bonds2["isin"] == todays_isins[idx]].iloc[0]
                 s = 0.0
+                # Prefer same issuer strongly to promote within-basket duplicates for diagnostics
+                s += 1.6 if bb["issuer"] == seed_b["issuer"] else 0.0
+                # Sector/rating/curve similarities keep baskets coherent
                 s += 1.0 if bb["sector"] == seed_b["sector"] else 0.0
                 s += 0.5 * (1.0 - abs(float(rating_levels[bb["rating"]]) - float(rating_levels[seed_b["rating"]])) / 5.0)
                 s += 0.2 * (1.0 if bb["curve_bucket_fine"] == seed_b["curve_bucket_fine"] else 0.0)
@@ -633,6 +638,8 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 XtX = Xc.T @ Xc + 1e-8 * np.eye(Xc.shape[1])
                 beta_ls = np.linalg.solve(XtX, Xc.T @ eps_raw)
                 eps = eps_raw - Xc @ beta_ls
+                # remove basket-level mean to avoid between-basket coupling
+                eps = eps - float(eps.mean())
                 # rescale std back to sigma_eps
                 sd = float(np.std(eps)) + 1e-12
                 eps = eps * (sigma_eps / sd)
@@ -660,12 +667,12 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 side = rng.choice(["BUY", "SELL"])
             side_sign = 1.0 if side == "SELL" else -1.0
 
-            # sizes & capping
+            # sizes & capping (use precomputed sizes_map to align with basket epsilon orthogonalization)
             if bnd["rating"] in ("AAA", "AA", "A", "BBB"):
                 mu = math.log(1.2e6); sigma = 1.0
             else:
                 mu = math.log(6.0e5); sigma = 1.0
-            size = float(np.clip(rng.lognormal(mu, sigma), 25_000.0, 10_000_000.0))
+            size = float(sizes_map.get(i, float(np.clip(rng.lognormal(mu, sigma), 25_000.0, 10_000_000.0))))
             size = float(int(size / 5000) * 5000)
             cap_thr = _cap_threshold(str(bnd["rating"]), params)
             is_capped = size > cap_thr
@@ -762,7 +769,10 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                     core = sum((ord(c) for c in str(isin_code)))
                 # large coprime multipliers to spread bits; mask to 31-bit
                 return int((params.seed * 1_000_003 + day_idx * 97_409 + core) & 0x7FFF_FFFF)
-            rng_eps = rng_eps_day
+            # Per-trade epsilon RNG seeded only by (day, isin) to avoid any coupling to
+            # within-day ordering, basket assignment, side/size draws, etc.
+            rng_eps = np.random.default_rng(_stable_trade_seed(int(d), str(isin)))
+            eps_override_val = eps_override_map.get(i, None)
             y_bps, h_bps, eps_bps, delta_bps, pi_ref_used = _compose_y_bps(
                 baseline_ref_bps=y_pi_ref_out,
                 size_z=size_z,
@@ -773,6 +783,7 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 params=params,
                 port_delta_bps=delta_for_y,
                 rng_eps=rng_eps,
+                eps_override=eps_override_val,
             )
             micro = float(rng.normal(prov_bias[provider], params.micro_price_noise_bps * prov_micro_scale[provider]))
             delta_obs_bps = y_bps + micro

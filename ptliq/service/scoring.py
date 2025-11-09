@@ -16,6 +16,9 @@ from ptliq.model.mv_dgt import MultiViewDGT
 from ptliq.training.mvdgt_loop import MVDGTModelConfig
 from ptliq.training.gru_loop import GRURegressor, GRUModelConfig
 
+# Debug flag for DGTScorer.score_many
+PTLIQ_SCORER_DEBUG = True
+
 
 @runtime_checkable
 class HasFeatureNames(Protocol):
@@ -1115,6 +1118,25 @@ class DGTScorer:
             # runtime grouping by portfolio_id
             port_ctx, pf_gid = _build_runtime_port_ctx(rows, node_ids, self.device)
         # else: keep portfolio path OFF (pf_gid=None, port_ctx=None)
+
+        # Debug: portfolio context info before model call
+        if PTLIQ_SCORER_DEBUG:
+            try:
+                if port_ctx is None:
+                    print("[scorer] port_ctx=None")
+                else:
+                    pl = port_ctx.get("port_len") if isinstance(port_ctx, dict) else None
+                    if pl is None:
+                        print(f"[scorer] port_ctx present but missing port_len; pf_gid_present={pf_gid is not None}")
+                    else:
+                        L = int(pl.numel())
+                        S = int(pl.sum().item())
+                        print(f"[scorer] port_ctx groups={L} total_items={S} pf_gid_present={pf_gid is not None}")
+            except Exception as _e:
+                try:
+                    print(f"[scorer] debug error: {_e}")
+                except Exception:
+                    pass
 
         yhat = self.model(
             self.x,

@@ -59,8 +59,18 @@ data:
       enable_attn_tb: false        # write attention stats to TB; off by default for speed
       attn_log_every: 200          # batch interval for attention logging
       # Portfolio similarity auxiliary loss (ID‑agnostic)
-      portfolio_sim_weight: 0.0    # weight for within-portfolio variance loss on z_pf; try 0.02–0.10
+      portfolio_sim_weight: 0.1    # weight for within-portfolio variance loss on z_pf; try 0.02–0.10
       portfolio_jitter_std: 0.05   # std for optional portfolio size jitter in augments (future use)
+      # Portfolio context runtime controls
+      train_use_dynamic_port_ctx: true  # Rebuild portfolio context on-the-fly from batch (pf_gid, side_sign, log_size)
+                                        # instead of using static precomputed context. Impact: adds minor CPU/GPU overhead but
+                                        # keeps PF vectors consistent with training batch; enable when portfolios vary per request
+                                        # or when using portfolio attention extensively. Recommendation: keep false
+                                        # to match dataset generator; consider true for advanced portfolio-sensitive training.
+      train_signless_pf: true           # Zero out signed PF weights during training so the model learns magnitude-only
+                                        # exposure, matching generator's signless target. Impact: better alignment to
+                                        # current synthetic targets; may reduce directional bias. Recommendation: true
+                                        # for current datasets; set false if your labels reflect signed exposure.
 
     model:
       hidden: 192                  # main hidden size (node/heads). 128–192 for ~12M rows on GPU; 64–96 on CPU
@@ -79,14 +89,14 @@ data:
       # This makes scores sensitive to portfolio composition (permutation-invariant within a portfolio; isolated across portfolios).
       # Defaults are conservative and suitable for 200–1000 line items per portfolio.
       use_portfolio_attn: true             # turn ON to enable portfolio self-/cross-attention; requires training with this flag
-      portfolio_attn_layers: 1             # number of Transformer encoder layers over portfolio tokens; 1–2 recommended
+      portfolio_attn_layers: 2             # number of Transformer encoder layers over portfolio tokens; 1–2 recommended
       portfolio_attn_heads: 4              # attention heads inside portfolio encoder; 4 is a good default
       portfolio_attn_dropout: null         # dropout inside portfolio encoder; null→fallback to `dropout` above (typ. 0.10)
       portfolio_attn_hidden: null          # internal token dim for portfolio encoder; null→use `hidden`; reduce if VRAM is tight
       portfolio_attn_concat_trade: true    # include per-trade features (side_sign, log_size) in portfolio tokens for attention
       portfolio_attn_concat_market: false  # include market features in portfolio tokens (usually false; market also goes to head)
       portfolio_attn_mode: residual        # how to fuse portfolio context back: 'residual' adds a gated residual; 'concat' appends to head
-      portfolio_attn_gate_init: 0.0        # logit init for the portfolio gate; 0.0→sigmoid(0)=0.5. Set negative (e.g., -2..-5) for safer warm-up
+      portfolio_attn_gate_init: 0.15       # logit init for the portfolio gate; 0.0→sigmoid(0)=0.5. Set negative (e.g., -2..-5) for safer warm-up
       max_portfolio_len: null              # optional cap per-portfolio length for attention; set 512/1024 for very large portfolios
 
       # Runtime‑computed/inferred fields (persisted for exact reconstruction at inference). Usually leave as null.

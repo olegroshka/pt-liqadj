@@ -78,6 +78,6 @@ def test_build_and_train_end_to_end(tmp_path: Path):
 
     # Quick smoke train for 2 epochs on CPU
     train_mvdgt.callback = None
-    train_mvdgt(workdir=outdir, pyg_dir=pyg_dir, epochs=2, batch_size=4, device_str="cpu")
+    train_mvdgt(workdir=outdir, pyg_dir=pyg_dir, epochs=2, batch_size=4, device="auto")
     # Check checkpoint: standard filename only
     assert (outdir/"ckpt.pt").exists()

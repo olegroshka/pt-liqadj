@@ -77,7 +77,7 @@ def test_dgt_scorer_smoke(tmp_path: Path):
 
     # quick train 1 epoch CPU for speed
     train_mvdgt.callback = None
-    train_mvdgt(workdir=outdir, pyg_dir=pyg_dir, epochs=1, batch_size=4, device_str="cpu")
+    train_mvdgt(workdir=outdir, pyg_dir=pyg_dir, epochs=1, batch_size=4, device="auto")
 
     # ensure artifacts exist
     assert (outdir/"ckpt.pt").exists()

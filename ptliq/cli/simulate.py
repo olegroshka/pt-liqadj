@@ -103,11 +103,25 @@ def main(
 
     sim_cfg = get_sim_config(cfg)  # object or dict with at least n_bonds, n_days, providers, seed
 
+    def _norm_cli(v):
+        """Normalize Typer OptionInfo defaults to None when function is called directly."""
+        try:
+            from typer.models import OptionInfo as _OptionInfo  # type: ignore
+            if isinstance(v, _OptionInfo):
+                return None
+        except Exception:
+            # typer may not be available or structure changed; fall back
+            pass
+        return v
+
     # Required basics (present in your existing config)
-    n_bonds = int(n_bonds) if n_bonds is not None else _getattr_safe(sim_cfg, "n_bonds", 300)
-    n_days = int(n_days) if n_days is not None else _getattr_safe(sim_cfg, "n_days", 30)
+    _n_bonds_cli = _norm_cli(n_bonds)
+    _n_days_cli = _norm_cli(n_days)
+    _seed_cli = _norm_cli(seed)
+    n_bonds = int(_n_bonds_cli) if _n_bonds_cli is not None else _getattr_safe(sim_cfg, "n_bonds", 300)
+    n_days = int(_n_days_cli) if _n_days_cli is not None else _getattr_safe(sim_cfg, "n_days", 30)
     providers = _getattr_safe(sim_cfg, "providers", ["P1"])
-    sim_seed = seed if seed is not None else _getattr_safe(sim_cfg, "seed", 42)
+    sim_seed = int(_seed_cli) if _seed_cli is not None else _getattr_safe(sim_cfg, "seed", 42)
 
     # Construct defaults to read dataclass defaults
     from ptliq.data.simulate import SimParams as _Def
@@ -131,9 +145,11 @@ def main(
     # Determine basket size bounds from CLI overrides or config pt_size
     _pt_size = _getattr_safe(sim_cfg, "pt_size", None)
     _uniq_flag = bool(_getattr_safe(sim_cfg, "unique_isin_per_pt", True))
-    if basket_size_min is not None or basket_size_max is not None:
-        bs_min = int(basket_size_min if basket_size_min is not None else _getattr_safe(sim_cfg, "basket_size_min", _defaults.basket_size_min))
-        bs_max = int(basket_size_max if basket_size_max is not None else _getattr_safe(sim_cfg, "basket_size_max", _defaults.basket_size_max))
+    _bmin_cli = _norm_cli(basket_size_min)
+    _bmax_cli = _norm_cli(basket_size_max)
+    if _bmin_cli is not None or _bmax_cli is not None:
+        bs_min = int(_bmin_cli) if _bmin_cli is not None else int(_getattr_safe(sim_cfg, "basket_size_min", _defaults.basket_size_min))
+        bs_max = int(_bmax_cli) if _bmax_cli is not None else int(_getattr_safe(sim_cfg, "basket_size_max", _defaults.basket_size_max))
     elif isinstance(_pt_size, (list, tuple)) and len(_pt_size) == 2:
         bs_min, bs_max = int(_pt_size[0]), int(_pt_size[1])
     else:

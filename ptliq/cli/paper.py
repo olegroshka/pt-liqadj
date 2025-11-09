@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 
 from ptliq.paper.experiment import MakeDataConfig, make_data, score_scenarios
+from ptliq.paper.make_figures import render_figs
 
 
 def _cmd_make_data(args: argparse.Namespace) -> None:
@@ -35,6 +36,14 @@ def _cmd_score_scenarios(args: argparse.Namespace) -> None:
     for k, v in out.items():
         print(f"{k}: {v}")
 
+
+def _cmd_make_figures(args: argparse.Namespace) -> None:
+    out = render_figs(Path(args.tables_dir), Path(args.out), tuple(args.formats))
+    for stem, files in out.items():
+        print(f"{stem}:")
+        for f in files:
+            print(f"  - {f}")
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="ptliq-paper", description="Paper helpers: make data & score scenarios")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -63,6 +72,13 @@ def main() -> None:
     p2.add_argument("--reps-per-group", type=int, default=2)
     p2.add_argument("--seed", type=int, default=100)
     p2.set_defaults(func=_cmd_score_scenarios)
+
+    # make-figures
+    p3 = sub.add_parser("make-figures", help="Create paper figures (PNG/PDF) from CSV tables")
+    p3.add_argument("--tables-dir", required=True, help="Folder containing CSVs from score-scenarios")
+    p3.add_argument("--out", required=True, help="Output folder for figures (PNG/PDF)")
+    p3.add_argument("--formats", nargs="*", default=("png", "pdf"), help="One or more formats, e.g. png pdf svg")
+    p3.set_defaults(func=_cmd_make_figures)
 
     args = p.parse_args()
     args.func(args)

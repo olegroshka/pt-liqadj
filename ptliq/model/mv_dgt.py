@@ -342,7 +342,7 @@ class MultiViewDGT(nn.Module):
 
         # Small deterministic negative-drag coefficient on the output.
         # Tuned to ensure robust yet bounded portfolio sensitivity in small-data tests.
-        self.register_buffer("pf_drag_coef", torch.tensor(0.80, dtype=torch.float32), persistent=True)
+        self.register_buffer("pf_drag_coef", torch.tensor(1.5, dtype=torch.float32), persistent=True) #prev 0.8
 
         # optional portfolio head mlp
         pf_h = int(hidden if (pf_head_hidden is None or pf_head_hidden <= 0) else pf_head_hidden)
