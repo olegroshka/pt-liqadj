@@ -380,6 +380,85 @@ ptliq-dgt-train \
 
 ---
 
+## Paper/report workflow: generate data, tables, and figures
+This repository includes a small helper CLI to reproduce the data and figures used in the project report/paper. It stitches together existing commands into three simple steps.
+
+Prerequisites:
+- Install the project (pip install -e .). GPU is optional; training uses CUDA if available.
+- Run all commands from the project root.
+
+### Step 1 — Create a paper run (simulate → featurize → build → train)
+This prepares synthetic data, graph + PyG features, builds MV-DGT samples/masks, and trains the MV-DGT model.
+
+```
+ptliq-paper make-data --root paper_runs/exp001
+```
+
+What it does under the hood (roughly):
+- ptliq-simulate → <root>/data/raw/sim
+- ptliq-featurize graph → <root>/data/graph
+- ptliq-featurize pyg → <root>/data/pyg
+- ptliq-dgt-build → <root>/data/mvdgt/exp001
+- ptliq-dgt-train → <root>/models/dgt
+
+It also writes a convenience manifest:
+- <root>/paper_meta.json with paths like raw_dir, graph_dir, pyg_dir, work_dir, model_dir.
+
+Useful options:
+- --seed 42 — simulation and training seed (default 42)
+- --n-nodes, --n-days — override simulator size/horizon
+- --model-dir <path> — custom output location for trained model
+- --no-overwrite — do not clean subfolders under <root> before running
+- Pass-throughs to low-level CLIs (optional):
+  - --simulate-args ...
+  - --feat-graph-args ...
+  - --feat-pyg-args ...
+  - --dgt-build-args ...
+  - --dgt-train-args ... (e.g., --epochs 30 --lr 5e-3 --batch-size 512 --seed 42 --device auto)
+
+Example (matches our internal repro):
+```
+ptliq-paper make-data --root paper_runs/exp001
+```
+
+### Step 2 — Score paper scenarios and write CSV tables
+Given the trained run directory, export CSVs used by the figures.
+
+```
+ptliq-paper score-scenarios \
+  --run-dir paper_runs/exp001/models/dgt \
+  --out paper/tables
+```
+
+This will produce (paths under --out):
+- warm_scenarios.csv
+- cold_scenarios.csv
+- portfolio_drift.csv
+- ablation.csv
+- negative_drag.csv
+- parity.csv
+
+### Step 3 — Render figures (PNG/PDF) from tables
+```
+ptliq-paper make-figures \
+  --tables-dir paper/tables \
+  --out paper/figs
+```
+
+Outputs include (both .png and .pdf by default):
+- fig_warm_size_elasticity, fig_warm_side_flip, fig_warm_time_roll
+- fig_cold_size_elasticity, fig_cold_side_flip
+- fig_portfolio_drift_hist
+- fig_ablation
+- fig_negative_drag
+
+Notes:
+- You can choose formats with --formats, e.g.:
+  - ptliq-paper make-figures --tables-dir paper/tables --out paper/figs --formats png pdf svg
+- Training uses device="auto"; to force CPU or CUDA, pass via --dgt-train-args (e.g., --device cpu or --device cuda).
+
+---
+
 ## TensorBoard: start/stop and where to look
 
 Most training commands can log to TensorBoard. Typical locations are under each model’s `tb/` subdirectory (e.g., `models/exp_sim1001_gatv2/tb`, `models/mvdgt/tb`).
