@@ -41,6 +41,7 @@ ptliq-run = "ptliq.cli.run:app"
 ptliq-web = "ptliq.cli.web:app"
 ptliq-dgt-build = "ptliq.cli.mvdgt_build:app"
 ptliq-dgt-train = "ptliq.cli.mvdgt_train:app"
+ptliq-dgt-export = "ptliq.cli.mvdgt_export_onnx:app"
 ptliq-gru-train = "ptliq.cli.gru_train:app"
 
 ptliq-exp = "ptliq.cli.exp_gnn_vs_baseline:app"
@@ -76,6 +77,7 @@ exclude = ["tests*", "notebooks*", "data*", "models*", "configs*", "reports*", "
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "mypy", "types-PyYAML"]
 market = ["yfinance", "pandas_datareader", "fredapi"]
+paper = ["onnxscript"]
 
 # (optional) if you have non-.py files inside ptliq you want included:
 # [tool.setuptools.package-data]
