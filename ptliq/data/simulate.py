@@ -85,6 +85,7 @@ class SimParams:
     delta_issuer: float = 5.0            # θ_iss (same-issuer fraction)
     delta_sector: float = 4.0            # θ_sec (sector crowding proxy)
     delta_noise_std: float = 3.0         # σ for ε in Δ*(P)
+    delta_mag: float = 0.0            # small signless magnitude term coefficient
 
     # --- Portfolio trade & TRACE-like mechanics ---
     portfolio_trade_share: float = 0.22  # share of trade lines that are part of portfolios
@@ -117,12 +118,16 @@ class SimParams:
     # Trade intensity controls
     base_intensity: float = 0.18         # baseline Poisson rate per bond per day
     liq_to_intensity: float = 0.006      # lift per unit of static vendor liq (scaled to 0..1)
+    intensity_link: str = "linear"      # 'linear' or 'exp' for dispersion
 
     # Urgency coefficient
     liq_urgency_coeff: float = 4.0
 
     # Use second-level timestamps like public TRACE
     second_resolution: bool = True
+
+    # Debug/test hooks
+    run_quick_checks: bool = False
 
 
 # Enums / constants
@@ -358,7 +363,10 @@ def _providers_liq_and_pref(params: SimParams, bonds: pd.DataFrame) -> Tuple[pd.
 # --------------------------------------------------------------------------------------
 def _pick_trade_count_per_bond(bonds: pd.DataFrame, params: SimParams, rng: np.random.Generator) -> Dict[str, int]:
     lref = bonds["vendor_liq_score_static"].to_numpy()
-    lam = params.base_intensity + params.liq_to_intensity * (lref / 100.0)
+    if getattr(params, "intensity_link", "linear") == "exp":
+        lam = params.base_intensity * np.exp(params.liq_to_intensity * (lref / 100.0 - 0.5))
+    else:
+        lam = params.base_intensity + params.liq_to_intensity * (lref / 100.0)
     lam = np.clip(lam, 0.01, None)
     counts = rng.poisson(lam, size=len(bonds))
     return {bonds.loc[i, "isin"]: int(counts[i]) for i in range(len(bonds))}
@@ -612,6 +620,30 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
             size_tmp = float(int(size_tmp / 5000) * 5000)
             sizes_map[i_tmp] = size_tmp
 
+        # Basket-level absolute DV01 mass (leave-one-out) z-scores for optional Δ*(P) magnitude term
+        pf_basket_abs_mass_z: Dict[int, float] = {}
+        for b_id, b in enumerate(baskets):
+            if len(b) <= 1:
+                for idx in b:
+                    pf_basket_abs_mass_z[idx] = 0.0
+                continue
+            # Compute absolute DV01 masses for items in basket
+            m_list = []
+            for idx in b:
+                isin_b = todays_isins[idx]
+                bnd_b = bonds2.loc[bonds2["isin"] == isin_b].iloc[0]
+                m_val = abs(float(bnd_b["dv01_per_100"]) * (sizes_map[idx] / 100.0))
+                m_list.append(float(m_val))
+            m_arr = np.asarray(m_list, dtype=float)
+            total = float(m_arr.sum())
+            co_sums = np.asarray([total - m_arr[j] for j in range(len(m_arr))], dtype=float)
+            mu = float(co_sums.mean())
+            sd = float(co_sums.std())
+            sd = sd if sd > 1e-12 else 1.0
+            z = (co_sums - mu) / sd
+            for pos, idx in enumerate(b):
+                pf_basket_abs_mass_z[idx] = float(z[pos])
+
         # If beta==0 and h(Q,U) is off, construct basket-level epsilon orthogonal to [log_size, side]
         eps_override_map: Dict[int, float] = {}
         h_off = (abs(params.liq_size_coeff) == 0.0 and abs(params.liq_side_coeff) == 0.0 and abs(params.liq_sector_coeff) == 0.0 and abs(params.liq_rating_coeff) == 0.0)
@@ -740,12 +772,16 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
             # Drop sector term from planted Δ to avoid confounding in Phase-1 tests
             sector_conc_proxy = 0.0
             # Compose Δ*(P)
+            basket_abs_mass_z = 0.0
+            if in_portfolio and basket_id is not None:
+                basket_abs_mass_z = float(pf_basket_abs_mass_z.get(i, 0.0))
             delta_signal = (
                 params.delta_bias
                 + params.delta_size * log_size
                 + params.delta_side * side_sign
                 + params.delta_issuer * float(frac_same_issuer_proxy)
                 + params.delta_sector * float(sector_conc_proxy)
+                + params.delta_mag * float(in_portfolio) * float(basket_abs_mass_z)
                 + float(rng.normal(0.0, params.delta_noise_std))
             )
             delta_star_bps = float(params.delta_scale * delta_signal)
@@ -861,7 +897,8 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
                 yield_exec=float(ytm_exec),
                 dv01_per_100=float(dv01_per_100),
                 dv01_dollar=float(dv01_per_100 * (size / 100.0)),
-                dv01_signed=float(dv01_per_100 * (1 if side == "BUY" else -1)),
+                #dv01_signed=float(dv01_per_100 * (1 if side == "BUY" else -1)),
+                dv01_signed=float(dv01_per_100 * (size / 100.0)) * (1.0 if side == "BUY" else -1.0),
 
                 sector=str(bnd["sector"]),
                 rating=str(bnd["rating"]),
@@ -896,6 +933,54 @@ def _gen_trades_with_targets(bonds: pd.DataFrame, n_days: int, params: SimParams
 # --------------------------------------------------------------------------------------
 # Public API
 # --------------------------------------------------------------------------------------
+def _quick_checks(bonds: pd.DataFrame, trades: pd.DataFrame, params: SimParams) -> None:
+    import numpy as np
+    import pandas as pd
+    import math
+    # 1) Integrity
+    assert trades["y_bps"].notna().all()
+    assert np.isfinite(trades["residual_bps"]).all()
+
+    # 2) Size elasticity: estimate B−A ≈ theta_size * log(1.2)
+    theta_size = params.delta_size
+    expected = theta_size * math.log(1.2)
+    # Build synthetic A/B for a random sample of portfolio trades: +20% size, same everything
+    samp = trades.sample(min(2000, len(trades)), random_state=7).copy()
+    # Anchor feature proxies
+    logsize = np.log(np.abs(samp["dv01_dollar"]) + 1.0)
+    # Predict Δ* change purely from planted size term
+    delta_est = theta_size * (np.log(1.2 * np.exp(logsize) - 1.0 + 1.0) - logsize)
+    assert np.isfinite(delta_est).all()
+    # Expect mean close to expected within a tolerance
+    assert abs(delta_est.mean() - expected) < 0.05, f"Size elasticity off: {delta_est.mean()} vs {expected}"
+
+    # 3) Side flip expected ≈ 2 * theta_side
+    theta_side = params.delta_side
+    side_flip_expected = 2.0 * theta_side
+    # Sanity on empirical residual regression
+    df = trades[["residual_bps","side_sign","log_size","frac_same_issuer"]].dropna()
+    if len(df) > 100:
+        from sklearn.linear_model import LinearRegression
+        X = df[["side_sign","log_size","frac_same_issuer"]].to_numpy()
+        y = df["residual_bps"].to_numpy()
+        coef = LinearRegression().fit(X, y).coef_
+        assert 0.5*theta_side < coef[0] < 1.5*theta_side
+
+    # 4) Portfolio‑only component is real
+    pf = trades[trades["portfolio_id"].notna()]
+    if len(pf) > 100:
+        corr = pf[["residual_bps","frac_same_issuer"]].dropna().corr().iloc[0,1]
+        assert corr > 0.05, f"Expected positive correlation with frac_same_issuer, got {corr:.3f}"
+
+    # 5) Zero‑signal mode (if you run with beta=0 and h==0): residual is independent
+    if params.delta_scale == 0 and all(abs(c)==0.0 for c in [
+        params.liq_size_coeff, params.liq_side_coeff, params.liq_sector_coeff, params.liq_rating_coeff]):
+        df0 = trades[["residual_bps","log_size","side_sign"]].dropna()
+        corr0 = df0.corr().abs()
+        assert corr0.loc["residual_bps","log_size"] < 0.05
+        assert corr0.loc["residual_bps","side_sign"] < 0.05
+
+
 def simulate(params: SimParams) -> Dict[str, pd.DataFrame]:
     set_seed(params.seed)
     logging.getLogger(__name__).info("Simulating %d bonds over %d days (seed=%d)", params.n_bonds, params.n_days, params.seed)
@@ -945,6 +1030,27 @@ def simulate(params: SimParams) -> Dict[str, pd.DataFrame]:
     else:
         trades["log_size"] = np.log(np.abs(pd.to_numeric(trades.get("size", 0.0), errors="coerce")) + 1.0)
 
+    # Compute frac_same_issuer and sector_signed_conc for tests if not present
+    if "portfolio_id" in trades.columns and "frac_same_issuer" not in trades.columns:
+        mask_pf = trades["portfolio_id"].notna()
+        if mask_pf.any():
+            if "issuer" not in trades.columns:
+                trades = trades.merge(bonds[["isin","issuer"]], on="isin", how="left")
+            keys = ["portfolio_id", "trade_dt"]
+            gsize = trades.loc[mask_pf].groupby(keys)["isin"].transform("size")
+            issuer_counts = trades.loc[mask_pf].groupby(keys + ["issuer"])['issuer'].transform('count')
+            frac_same = (issuer_counts - 1) / (gsize - 1).replace(0, np.nan)
+            trades.loc[mask_pf, "frac_same_issuer"] = frac_same.astype(float)
+
+            pf = trades.loc[mask_pf, keys + ["sector", "dv01_dollar", "side_sign"]].copy()
+            pf["dv01_dollar"] = pd.to_numeric(pf["dv01_dollar"], errors="coerce").fillna(0.0)
+            pf["side_sign"] = pd.to_numeric(pf["side_sign"], errors="coerce").fillna(0.0)
+            pf["signed"] = pf["dv01_dollar"] * pf["side_sign"]
+            pf["denom"] = pf.groupby(keys)["dv01_dollar"].transform(lambda s: s.abs().sum()) + 1e-8
+            pf["signed_sum_sec"] = pf.groupby(keys + ["sector"])['signed'].transform('sum').abs()
+            pf["sector_signed_conc"] = (pf["signed_sum_sec"] / pf["denom"]).astype(float)
+            trades.loc[pf.index, "sector_signed_conc"] = pf["sector_signed_conc"].values
+
     # Basket-level statistics for tests
     if "portfolio_id" in trades.columns:
         mask_pf = trades["portfolio_id"].notna()
@@ -978,5 +1084,12 @@ def simulate(params: SimParams) -> Dict[str, pd.DataFrame]:
     # basic integrity (compatibility)
     assert {"isin", "issuer", "sector", "rating", "issue_date", "maturity", "coupon", "amount_out", "curve_bucket"}.issubset(bonds.columns)
     assert {"ts", "isin", "side", "size", "is_portfolio", "y_bps", "price", "price_clean_exec"}.issubset(trades.columns)
+
+    # Optional quick checks
+    if getattr(params, "run_quick_checks", False):
+        try:
+            _quick_checks(bonds, trades, params)
+        except Exception as e:
+            logging.getLogger(__name__).warning("Quick checks failed: %s", e)
 
     return {"bonds": bonds, "trades": trades}
