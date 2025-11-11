@@ -20,6 +20,8 @@ dependencies = [
     "tensorboard",
     "requests",
     "gradio==5.49.1",
+    "matplotlib",
+    "seaborn"
 ]
 
 [project.scripts]

@@ -571,3 +571,12 @@ If you ever encounter a page stuck on "Loading…":
 - If `torch-geometric` complains about incompatible wheels, reinstall it matching your Torch/CUDA versions (see official docs), then reinstall this project with `pip install -e .`.
 - On CPU-only hosts, pass `--device cpu` to training CLIs or set `device: "cpu"` in configs.
 - Use `ptliq-explore` and `ptliq-pyg-explore` to sanity-check inputs before training.
+
+
+---
+
+## Using real TRACE data with MV‑DGT
+
+If you plan to train/serve MV‑DGT on real markets (TRACE Enhanced + vendor reference/evaluated prices), see the step‑by‑step adapter guide:
+
+- docs/TRACE_to_MV_DGT_ADAPTER.md — maps TRACE/security‑master fields to the minimal trades.parquet and bonds.parquet schemas, includes a reference pandas adapter snippet, and shows how to run featurization/build steps.
