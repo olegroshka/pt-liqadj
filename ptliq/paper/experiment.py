@@ -600,73 +600,65 @@ def score_scenarios(
         df_cold.to_csv(cold_path, index=False)
         logger.info("Wrote %s", cold_path)
 
-    # ---------- Portfolio drift with ~10-line baskets ----------
+    # ---------- Portfolio drift: anchor A vs B with ~10-line baskets ----------
+    # Build baskets with stronger, interpretable skew so |Δ| is measurable.
+    rng = np.random.default_rng(seed + 77)
     portfolios_by_gid: Dict[int, List[int]] = {}
     for gid in samples["pf_gid"].dropna().astype(int).unique().tolist():
         members = samples[samples["pf_gid"] == gid]["node_id"].astype(int).unique().tolist()
         portfolios_by_gid[int(gid)] = members
 
-    # choose up to K anchors from warm reps
-    K = min(6, len(reps))
-    abs_deltas = []; deltas = []
-    rows_A: List[List[Dict[str, Any]]] = []
-    rows_B: List[List[Dict[str, Any]]] = []
-    target_len = 10  # total lines per toy basket
+    rows_A, rows_B, abs_deltas = [], [], []
+    K = min(8, len(reps))  # use up to 8 anchors
+    BASKET_K = 10          # ~10-line portfolios as requested
+    CO_SIZE_BUY = 1.5e5
+    CO_SIZE_SELL = 2.5e5
+
+    def _asof(di: int) -> str:
+        return _asof_for_idx(di) if mi is not None else ""
 
     for k in range(K):
         r = reps[k]
-        nid_k = int(r.node_id)
-        asin_k = art["nid2isin"][nid_k]
-        asof_k = _asof_for_idx(int(r.date_idx))
+        nid_k = int(r.node_id); asin_k = art["nid2isin"][nid_k]
+        asof_k = _asof(int(r.date_idx))
         base_size_k = float(np.expm1(float(r.log_size)))
         side_lbl = "BUY" if float(r.side_sign) > 0 else "SELL"
-        gk = int(r.pf_gid)
+        gid_k = int(r.pf_gid)
 
-        group_members = [m for m in portfolios_by_gid.get(gk, []) if m != nid_k]
-        # fill same-group BUYs
-        others1 = group_members[:max(0, target_len-1)]
-        if len(others1) < (target_len-1):
-            # pad from any other nodes
-            pool = [nid for nid in art["nid2isin"].keys() if nid not in set([nid_k] + others1)]
-            others1 += pool[: (target_len-1 - len(others1))]
+        same_group = [j for j in portfolios_by_gid.get(gid_k, []) if j != nid_k]
+        other_groups = [g for g in portfolios_by_gid.keys() if g != gid_k]
+        cross_group = portfolios_by_gid[other_groups[0]] if other_groups else same_group
 
-        # cross-group SELLs for B
-        other_groups = [g for g in portfolios_by_gid.keys() if g != gk]
-        cross_nodes = []
-        for og in other_groups:
-            cross_nodes += [n for n in portfolios_by_gid.get(og, [])]
-        cross_nodes = [n for n in cross_nodes if n != nid_k][: (target_len-1)]
-        if len(cross_nodes) < (target_len-1):
-            pool = [nid for nid in art["nid2isin"].keys() if nid not in set([nid_k] + cross_nodes)]
-            cross_nodes += pool[: (target_len-1 - len(cross_nodes))]
+        # pick co-items
+        rng.shuffle(same_group); rng.shuffle(cross_group)
+        co_A = same_group[:BASKET_K-1]
+        co_B = cross_group[:BASKET_K-1]
 
-        # sizes: modest BUYs vs larger SELLs
-        small_sz = 1.0e5
-        big_sz = 2.0e5
-
-        P_A = [{"portfolio_id": f"A_{k}", "isin": asin_k, "side": side_lbl,
+        # A: anchor + same-group BUY co-items
+        P_A = [{"portfolio_id": f"A_{k}", "pf_gid": 0, "isin": asin_k, "side": side_lbl,
                 "size": base_size_k, "asof_date": asof_k}]
-        P_A += [{"portfolio_id": f"A_{k}", "isin": art["nid2isin"][j], "side": "BUY",
-                 "size": small_sz, "asof_date": asof_k} for j in others1[:(target_len-1)]]
+        P_A += [{"portfolio_id": f"A_{k}", "pf_gid": 0, "isin": art["nid2isin"][j],
+                 "side": "BUY", "size": CO_SIZE_BUY, "asof_date": asof_k} for j in co_A]
 
-        P_B = [{"portfolio_id": f"B_{k}", "isin": asin_k, "side": side_lbl,
+        # B: anchor + cross-group SELL co-items (heavier size)
+        P_B = [{"portfolio_id": f"B_{k}", "pf_gid": 1, "isin": asin_k, "side": side_lbl,
                 "size": base_size_k, "asof_date": asof_k}]
-        P_B += [{"portfolio_id": f"B_{k}", "isin": art["nid2isin"][j], "side": "SELL",
-                 "size": big_sz, "asof_date": asof_k} for j in cross_nodes[:(target_len-1)]]
+        P_B += [{"portfolio_id": f"B_{k}", "pf_gid": 1, "isin": art["nid2isin"][j],
+                 "side": "SELL", "size": CO_SIZE_SELL, "asof_date": asof_k} for j in co_B]
 
         rows_A.append(P_A); rows_B.append(P_B)
 
+    logger.info("Computing portfolio drift across %d anchors with %d-line baskets…", len(rows_A), BASKET_K)
+    deltas = []
     for P_A, P_B in zip(rows_A, rows_B):
-        yA = float(scorer.score_many(P_A)[0])
-        yB = float(scorer.score_many(P_B)[0])
+        yA = float(scorer.score_many(P_A)[0]); yB = float(scorer.score_many(P_B)[0])
         deltas.append(yB - yA); abs_deltas.append(abs(yB - yA))
     df_drift = pd.DataFrame({"delta_bps": deltas, "abs_delta_bps": abs_deltas})
     drift_path = out_dir / "portfolio_drift.csv"
     df_drift.to_csv(drift_path, index=False)
-    try:
-        logger.info("Wrote %s (avg |delta|=%.3f bps)", drift_path, float(np.mean(abs_deltas)) if abs_deltas else float('nan'))
-    except Exception:
-        logger.info("Wrote %s", drift_path)
+    logger.info("Wrote %s (avg |Δ|=%.3f bps, median |Δ|=%.3f bps)", drift_path,
+                float(np.mean(abs_deltas)) if abs_deltas else np.nan,
+                float(np.median(abs_deltas)) if abs_deltas else np.nan)
 
     # ---------- View ablation + context removal on the strongest drift pair ----------
     if rows_A:
