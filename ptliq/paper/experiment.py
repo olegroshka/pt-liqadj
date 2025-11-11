@@ -178,7 +178,7 @@ def make_data(cfg: MakeDataConfig) -> Dict[str, str]:
 
 
 # -----------------------------
-# Scenario scoring (A/B/C/D, warm/cold, parity, drift, ablation)
+# Artifacts loader (extended)
 # -----------------------------
 def _load_run_artifacts(model_dir: Path):
     model_dir = Path(model_dir)
@@ -190,8 +190,8 @@ def _load_run_artifacts(model_dir: Path):
     x = data.x.float()
     edge_index = data.edge_index
     edge_weight = data.edge_weight if hasattr(data, "edge_weight") else None
+
     # samples (training copy should be in outdir)
-    # prefer meta pointer, else sibling file
     samples_path = files.get("samples") or str((model_dir / "samples.parquet"))
     if not Path(samples_path).exists():
         raise FileNotFoundError("samples.parquet not found; ensure training persisted a copy and meta['files']['samples'] points to it.")
@@ -203,11 +203,8 @@ def _load_run_artifacts(model_dir: Path):
         # Fallbacks around the pyg graph location
         candidates = []
         if pyg_graph:
-            # 1) Same folder as pyg_graph
             candidates.append(Path(pyg_graph).parent / "graph_nodes.parquet")
-            # 2) Sibling graph folder next to pyg folder (…/data/graph/graph_nodes.parquet)
             candidates.append(Path(pyg_graph).parent.parent / "graph" / "graph_nodes.parquet")
-        # Pick the first existing candidate
         for c in candidates:
             if c.exists():
                 nodes_path = str(c)
@@ -223,6 +220,25 @@ def _load_run_artifacts(model_dir: Path):
     # masks path (for ablation convenience)
     masks_path = files.get("view_masks") or str((model_dir / "view_masks.pt"))
 
+    # market index (optional, but used for test split join)
+    mi_path = files.get("market_index")
+    mi = pd.read_parquet(mi_path) if (mi_path and Path(mi_path).exists()) else None
+    if mi is not None:
+        mi["asof_date"] = pd.to_datetime(mi["asof_date"]).dt.normalize()
+
+    # try to resolve trades parquet for downstream test portfolio eval
+    trades_path = files.get("trades_path") or files.get("trades")
+    if not trades_path or not Path(trades_path).exists():
+        # local fallbacks around typical run layout
+        candidates = [
+            model_dir.parent.parent / "data" / "raw" / "sim" / "trades.parquet",
+            model_dir.parent / "data" / "raw" / "sim" / "trades.parquet",
+        ]
+        for c in candidates:
+            if c.exists():
+                trades_path = str(c)
+                break
+
     return {
         "meta": meta,
         "samples": samples,
@@ -232,9 +248,14 @@ def _load_run_artifacts(model_dir: Path):
         "nid2isin": nid2isin,
         "isin2nid": isin2nid,
         "masks_path": masks_path,
+        "market_index": mi,
+        "trades_path": trades_path,
     }
 
 
+# -----------------------------
+# Direct forward (kept for parity/ablation)
+# -----------------------------
 def _direct_forward(
     model_dir: Path,
     req_rows: List[Dict[str, Any]],
@@ -243,9 +264,8 @@ def _direct_forward(
 ) -> np.ndarray:
     """
     Direct forward using MultiViewDGT, mirroring DGTScorer’s preprocessing.
-    Kept nearly identical to your e2e test _direct_predict() for parity.
     """
-    # device auto-selection
+    # device
     if device == "auto":
         if torch.cuda.is_available():
             dev = torch.device("cuda")
@@ -255,17 +275,12 @@ def _direct_forward(
             dev = torch.device("cpu")
     else:
         dev = torch.device(device)
-    # unify naming for subsequent code
     device = dev
 
     ckpt = torch.load(Path(model_dir) / "ckpt.pt", map_location="cpu")
-    # Prefer persisted model_config.json when present; fallback to checkpoint's embedded config
-    cfg_dict = None
+    # Prefer persisted model_config.json; fallback to embedded
     json_cfg_path = Path(model_dir) / "model_config.json"
-    if json_cfg_path.exists():
-        cfg_dict = json.loads(json_cfg_path.read_text())
-    else:
-        cfg_dict = ckpt.get("model_config", {})
+    cfg_dict = json.loads(json_cfg_path.read_text()) if json_cfg_path.exists() else ckpt.get("model_config", {})
     model_cfg = MVDGTModelConfig(**cfg_dict)
     meta = json.loads((Path(model_dir) / "mvdgt_meta.json").read_text())
     vm_path = Path(model_dir) / "view_masks.pt" if (view_masks_path is None) else Path(view_masks_path)
@@ -279,8 +294,7 @@ def _direct_forward(
     vm = {k: v.to(device) for k, v in view_masks.items()}
 
     # market (z-score + sign if available)
-    mkt_ctx = None
-    mkt_lookup = None
+    mkt_ctx = None; mkt_lookup = None
     mkt_ctx_path = meta["files"].get("market_context")
     mkt_idx_path = meta["files"].get("market_index")
     if mkt_ctx_path and Path(mkt_ctx_path).exists():
@@ -289,7 +303,8 @@ def _direct_forward(
             idx_df = pd.read_parquet(mkt_idx_path)
             idx_df["asof_date"] = pd.to_datetime(idx_df["asof_date"]).dt.normalize()
             mkt_lookup = {pd.Timestamp(r.asof_date): int(r.row_idx) for r in idx_df.itertuples(index=False)}
-    # market preproc (saved by training)
+
+    # market preproc
     mkt_mean = None; mkt_std = None; mkt_sign = 1.0
     preproc_path = Path(model_dir) / "market_preproc.json"
     if preproc_path.exists():
@@ -313,9 +328,7 @@ def _direct_forward(
                 nodes_path = str(c)
                 break
         if not nodes_path:
-            raise FileNotFoundError(
-                "graph_nodes.parquet not found; looked next to pyg graph and in sibling 'graph' folder."
-            )
+            raise FileNotFoundError("graph_nodes.parquet not found; looked next to pyg graph and in sibling 'graph' folder.")
     nodes = pd.read_parquet(nodes_path)
     isin_to_node = {str(r.isin): int(r.node_id) for r in nodes.itertuples(index=False)}
 
@@ -326,8 +339,7 @@ def _direct_forward(
     std  = torch.tensor([float(sc["std"][i]) if (float(sc["std"][i]) > 0.0) else 1.0
                          for i in range(len(fnames))], dtype=torch.float32, device=device)
 
-    # model (mirror DGTScorer wiring; honor saved model_config.json)
-    # Ensure market dims/flags if missing in saved config
+    # ensure market dims flags
     if getattr(model_cfg, "mkt_dim", None) is None:
         try:
             model_cfg.mkt_dim = int(mkt_ctx["mkt_feat"].size(1)) if (mkt_ctx is not None) else 0
@@ -397,9 +409,10 @@ def _direct_forward(
 
         # market
         market_feat = None
-        if mkt_ctx is not None:
+        mkt_ctx_local = mkt_ctx
+        if mkt_ctx_local is not None:
             idxs = []
-            last_idx = int(mkt_ctx["mkt_feat"].size(0) - 1)
+            last_idx = int(mkt_ctx_local["mkt_feat"].size(0) - 1)
             if mkt_lookup:
                 items = sorted(mkt_lookup.items())
                 dates_index = pd.to_datetime([k for k, _ in items])
@@ -420,7 +433,7 @@ def _direct_forward(
                     pos = max(0, min(pos, len(idx_arr) - 1))
                     idxs.append(int(idx_arr[pos]))
             di = torch.as_tensor(idxs, dtype=torch.long, device=device)
-            market_feat = mkt_ctx["mkt_feat"].index_select(0, di)
+            market_feat = mkt_ctx_local["mkt_feat"].index_select(0, di)
             if (mkt_mean is not None) and (mkt_std is not None):
                 denom = torch.where(mkt_std <= 0, torch.ones_like(mkt_std), mkt_std)
                 market_feat = (market_feat - mkt_mean) / denom
@@ -437,6 +450,9 @@ def _direct_forward(
     return y
 
 
+# -----------------------------
+# Scenario scoring + NEW evaluations
+# -----------------------------
 def score_scenarios(
     model_dir: Path,
     out_dir: Path,
@@ -445,14 +461,14 @@ def score_scenarios(
     seed: int = 100,
 ) -> Dict[str, str]:
     """
-    Replays the e2e scenarios and writes multiple CSVs:
+    Writes multiple CSVs:
       - warm_scenarios.csv (A/B/C/D)
       - cold_scenarios.csv (A/B/C)
-      - portfolio_drift.csv (A vs B baskets across anchors)
+      - portfolio_drift.csv (A vs B baskets across anchors)  [NOW: ~10-line baskets]
       - ablation.csv (mask port view & no portfolio context)
       - parity.csv (scorer vs direct)
-      - negative_drag.csv (BUY/SELL deltas constructed to be negative under LOO)
-    Returns paths for convenience.
+      - test_portfolios_eval.csv (NEW: prediction vs true residual on unseen portfolios)
+      - single_line_eval.csv (NEW: 1-line pseudo-portfolios vs baseline)
     """
     rng = np.random.default_rng(seed)
     out_dir = _ensure_dir(Path(out_dir))
@@ -470,11 +486,12 @@ def score_scenarios(
     # Load artifacts
     logger.info("Loading run artifacts…")
     art = _load_run_artifacts(Path(model_dir))
-    logger.info("Loaded artifacts: samples=%d, masks_path=%s", len(art["samples"]), art["masks_path"]) 
+    logger.info("Loaded artifacts: samples=%d, masks_path=%s", len(art["samples"]), art["masks_path"])
     samples: pd.DataFrame = art["samples"]
     nid2isin = art["nid2isin"]
     isin2nid = art["isin2nid"]
     masks_path = Path(art["masks_path"])
+    market_index = art["market_index"]
 
     # Scorer
     logger.info("Initializing DGTScorer…")
@@ -504,13 +521,7 @@ def score_scenarios(
             cold_reps = [src.loc[i] for i in idx]
 
     # Shortcuts for reading market index if present
-    meta = art["meta"]
-    mi_path = meta.get("files", {}).get("market_index")
-    mi = None
-    if mi_path and Path(mi_path).exists():
-        mi = pd.read_parquet(mi_path)
-        mi["asof_date"] = pd.to_datetime(mi["asof_date"]).dt.normalize()
-
+    mi = market_index
     def _asof_for_idx(di: int) -> str:
         if mi is None:
             return ""
@@ -547,17 +558,17 @@ def score_scenarios(
             warm_rows.append({"portfolio_id": f"PF-{int(r.pf_gid)}", "pf_gid": int(r.pf_gid),
                               "isin": asin, "side": base_side, "size": base_size})
 
-    logger.info("Scoring warm scenarios (%d rows)…", len(warm_rows))
-    y_scorer_warm = scorer.score_many(warm_rows)
-    y_direct_warm = _direct_forward(Path(model_dir), warm_rows, device=device_str)
+    y_scorer_warm = scorer.score_many(warm_rows) if warm_rows else np.array([], dtype=np.float32)
+    y_direct_warm = _direct_forward(Path(model_dir), warm_rows, device=device_str) if warm_rows else np.array([], dtype=np.float32)
     scen_labels = ["A","B","C","D"] * (len(warm_rows)//4) + (["A"] * (len(warm_rows) % 4))
     df_warm = pd.DataFrame(warm_rows)
-    df_warm["scenario"] = scen_labels[:len(df_warm)]
-    df_warm["pred_scorer_bps"] = y_scorer_warm
-    df_warm["pred_direct_bps"] = y_direct_warm
-    warm_path = out_dir / "warm_scenarios.csv"
-    df_warm.to_csv(warm_path, index=False)
-    logger.info("Wrote %s", warm_path)
+    if len(df_warm) > 0:
+        df_warm["scenario"] = scen_labels[:len(df_warm)]
+        df_warm["pred_scorer_bps"] = y_scorer_warm
+        df_warm["pred_direct_bps"] = y_direct_warm
+        warm_path = out_dir / "warm_scenarios.csv"
+        df_warm.to_csv(warm_path, index=False)
+        logger.info("Wrote %s", warm_path)
 
     # ---------- Cold: A/B/C ----------
     cold_rows: List[Dict[str, Any]] = []
@@ -568,18 +579,17 @@ def score_scenarios(
         asof = _asof_for_idx(di)
         base_size = float(np.expm1(float(r.log_size)))
         base_side = "BUY" if float(r.side_sign) > 0 else "SELL"
-        # A:
+        # A
         cold_rows.append({"portfolio_id": f"PF-{int(r.pf_gid)}", "pf_gid": int(r.pf_gid),
                           "isin": asin, "side": base_side, "size": base_size, "asof_date": asof})
-        # B:
+        # B
         cold_rows.append({"portfolio_id": f"PF-{int(r.pf_gid)}", "pf_gid": int(r.pf_gid),
                           "isin": asin, "side": base_side, "size": base_size * 1.5, "asof_date": asof})
-        # C:
+        # C
         cold_rows.append({"portfolio_id": f"PF-{int(r.pf_gid)}", "pf_gid": int(r.pf_gid),
                           "isin": asin, "side": ("SELL" if base_side == "BUY" else "BUY"),
                           "size": base_size, "asof_date": asof})
     if cold_rows:
-        logger.info("Scoring cold scenarios (%d rows)…", len(cold_rows))
         y_scorer_cold = scorer.score_many(cold_rows)
         y_direct_cold = _direct_forward(Path(model_dir), cold_rows, device=device_str)
         df_cold = pd.DataFrame(cold_rows)
@@ -590,19 +600,19 @@ def score_scenarios(
         df_cold.to_csv(cold_path, index=False)
         logger.info("Wrote %s", cold_path)
 
-    # ---------- Portfolio drift: A vs B baskets per anchor (warm reps) ----------
-    # Build two baskets per anchor: P_A = anchor + 2 same‑group BUY co‑items
-    # P_B = anchor + 2 different‑group SELL co‑items at larger sizes
-    abs_deltas = []
-    rows_A = []
-    rows_B = []
-
+    # ---------- Portfolio drift with ~10-line baskets ----------
     portfolios_by_gid: Dict[int, List[int]] = {}
     for gid in samples["pf_gid"].dropna().astype(int).unique().tolist():
         members = samples[samples["pf_gid"] == gid]["node_id"].astype(int).unique().tolist()
         portfolios_by_gid[int(gid)] = members
 
+    # choose up to K anchors from warm reps
     K = min(6, len(reps))
+    abs_deltas = []; deltas = []
+    rows_A: List[List[Dict[str, Any]]] = []
+    rows_B: List[List[Dict[str, Any]]] = []
+    target_len = 10  # total lines per toy basket
+
     for k in range(K):
         r = reps[k]
         nid_k = int(r.node_id)
@@ -613,31 +623,43 @@ def score_scenarios(
         gk = int(r.pf_gid)
 
         group_members = [m for m in portfolios_by_gid.get(gk, []) if m != nid_k]
-        others1 = group_members[:2] if len(group_members) >= 2 else [j for j in portfolios_by_gid.get(gk, []) if j != nid_k][:2]
-        # choose a different group deterministically
+        # fill same-group BUYs
+        others1 = group_members[:max(0, target_len-1)]
+        if len(others1) < (target_len-1):
+            # pad from any other nodes
+            pool = [nid for nid in art["nid2isin"].keys() if nid not in set([nid_k] + others1)]
+            others1 += pool[: (target_len-1 - len(others1))]
+
+        # cross-group SELLs for B
         other_groups = [g for g in portfolios_by_gid.keys() if g != gk]
-        others2 = (portfolios_by_gid[other_groups[0]][:2] if other_groups else others1)
+        cross_nodes = []
+        for og in other_groups:
+            cross_nodes += [n for n in portfolios_by_gid.get(og, [])]
+        cross_nodes = [n for n in cross_nodes if n != nid_k][: (target_len-1)]
+        if len(cross_nodes) < (target_len-1):
+            pool = [nid for nid in art["nid2isin"].keys() if nid not in set([nid_k] + cross_nodes)]
+            cross_nodes += pool[: (target_len-1 - len(cross_nodes))]
 
-        P_A = [{"portfolio_id": f"A_{k}", "pf_gid": 0, "isin": asin_k, "side": side_lbl,
-                "size": base_size_k, "asof_date": asof_k}] + \
-              [{"portfolio_id": f"A_{k}", "pf_gid": 0, "isin": art["nid2isin"][j], "side": "BUY",
-                "size": 1.0e5, "asof_date": asof_k} for j in others1]
+        # sizes: modest BUYs vs larger SELLs
+        small_sz = 1.0e5
+        big_sz = 2.0e5
 
-        P_B = [{"portfolio_id": f"B_{k}", "pf_gid": 1, "isin": asin_k, "side": side_lbl,
-                "size": base_size_k, "asof_date": asof_k}] + \
-              [{"portfolio_id": f"B_{k}", "pf_gid": 1, "isin": art["nid2isin"][j], "side": "SELL",
-                "size": 2.0e5, "asof_date": asof_k} for j in others2]
+        P_A = [{"portfolio_id": f"A_{k}", "isin": asin_k, "side": side_lbl,
+                "size": base_size_k, "asof_date": asof_k}]
+        P_A += [{"portfolio_id": f"A_{k}", "isin": art["nid2isin"][j], "side": "BUY",
+                 "size": small_sz, "asof_date": asof_k} for j in others1[:(target_len-1)]]
 
-        rows_A.append(P_A)
-        rows_B.append(P_B)
+        P_B = [{"portfolio_id": f"B_{k}", "isin": asin_k, "side": side_lbl,
+                "size": base_size_k, "asof_date": asof_k}]
+        P_B += [{"portfolio_id": f"B_{k}", "isin": art["nid2isin"][j], "side": "SELL",
+                 "size": big_sz, "asof_date": asof_k} for j in cross_nodes[:(target_len-1)]]
 
-    logger.info("Computing portfolio drift across %d anchors…", len(rows_A))
-    deltas = []
+        rows_A.append(P_A); rows_B.append(P_B)
+
     for P_A, P_B in zip(rows_A, rows_B):
         yA = float(scorer.score_many(P_A)[0])
         yB = float(scorer.score_many(P_B)[0])
-        deltas.append(yB - yA)
-        abs_deltas.append(abs(yB - yA))
+        deltas.append(yB - yA); abs_deltas.append(abs(yB - yA))
     df_drift = pd.DataFrame({"delta_bps": deltas, "abs_delta_bps": abs_deltas})
     drift_path = out_dir / "portfolio_drift.csv"
     df_drift.to_csv(drift_path, index=False)
@@ -649,24 +671,18 @@ def score_scenarios(
     # ---------- View ablation + context removal on the strongest drift pair ----------
     if rows_A:
         logger.info("Running ablation: zeroing 'port' view and disabling portfolio context…")
-        # Save a masks copy with 'port' view zeroed
         vm = torch.load(masks_path, map_location="cpu")
         vm_ablate = {k: v.clone() for k, v in vm.items()}
         if "port" in vm_ablate:
             vm_ablate["port"] = torch.zeros_like(vm_ablate["port"])
         ablate_path = Path(model_dir) / "view_masks_port_off.pt"
         torch.save(vm_ablate, ablate_path)
-        logger.info("Ablation masks saved to %s", ablate_path)
-
         idx_best = int(np.argmax(np.asarray(abs_deltas)))
-        from_rowsA = rows_A[idx_best]
-        from_rowsB = rows_B[idx_best]
+        from_rowsA = rows_A[idx_best]; from_rowsB = rows_B[idx_best]
 
-        # parity with full model (direct path uses masks under model_dir)
         yA_full = float(scorer.score_many(from_rowsA)[0])
         yB_full = float(scorer.score_many(from_rowsB)[0])
 
-        # direct forward with 'port' mask off and *portfolio context disabled*
         def _strip_pf(rows):
             return [{k:v for k,v in r.items() if k not in ("portfolio_id","pf_gid")} for r in rows]
         yA_port0 = float(_direct_forward(Path(model_dir), _strip_pf(from_rowsA), view_masks_path=ablate_path, device=device_str)[0])
@@ -680,57 +696,172 @@ def score_scenarios(
         df_ablate.to_csv(ablate_out, index=False)
         logger.info("Wrote %s", ablate_out)
 
-    # ---------- BUY/SELL negative drag (sign‑symmetric) ----------
-    # Build baskets: P0 = [anchor only]; Pdrag = add 2 co‑items with equal & opposite sizes → signed weight ~ 0
-    # Drag must be negative for BUY and SELL if the portfolio residual is sign‑agnostic LOO.
-    neg_rows = []
-    sides = ["BUY", "SELL"]
-    # choose a consistent anchor from reps if available
-    if reps:
-        r = reps[0]
-        anchor_nid = int(r.node_id)
-        asin_anchor = art["nid2isin"][anchor_nid]
-        asof = _asof_for_idx(int(r.date_idx))
-        # pick two co‑items from the same group (or arbitrary)
-        gk = int(r.pf_gid)
-        group_members = [m for m in portfolios_by_gid.get(gk, []) if m != anchor_nid]
-        if len(group_members) < 2:
-            # fallback: any two nodes ≠ anchor
-            pool = [nid for nid in art["nid2isin"].keys() if nid != anchor_nid]
-            group_members = pool[:2]
-        if len(group_members) >= 2:
-            c1, c2 = int(group_members[0]), int(group_members[1])
-            for side in sides:
-                P0 = [{"portfolio_id": f"NEG_{side}", "pf_gid": 0, "isin": asin_anchor,
-                       "side": side, "size": 1.5e5, "asof_date": asof}]
-                Pdrag = P0 + [
-                    {"portfolio_id": f"NEG_{side}", "pf_gid": 0, "isin": art["nid2isin"][c1],
-                     "side": "BUY", "size": 2.0e5, "asof_date": asof},
-                    {"portfolio_id": f"NEG_{side}", "pf_gid": 0, "isin": art["nid2isin"][c2],
-                     "side": "SELL", "size": 2.0e5, "asof_date": asof},
-                ]
-                y0 = float(scorer.score_many(P0)[0])
-                yD = float(scorer.score_many(Pdrag)[0])
-                neg_rows.append({"side": side, "delta_bps": yD - y0})
-    if neg_rows:
-        neg_path = out_dir / "negative_drag.csv"
-        pd.DataFrame(neg_rows).to_csv(neg_path, index=False)
-        logger.info("Wrote %s", neg_path)
-
     # ---------- Tiny parity snapshot ----------
     one = [{"isin": list(isin2nid.keys())[0], "side": "BUY", "size": 1e5}]
     p_s = scorer.score_many(one)[0]
     p_d = _direct_forward(Path(model_dir), one, device=device_str)[0]
     parity_path = out_dir / "parity.csv"
-    pd.DataFrame([{"pred_scorer_bps": p_s, "pred_direct_bps": p_d, "abs_diff": abs(p_s - p_d)}]) \
-      .to_csv(parity_path, index=False)
+    pd.DataFrame([{"pred_scorer_bps": p_s, "pred_direct_bps": p_d, "abs_diff": abs(p_s - p_d)}]).to_csv(parity_path, index=False)
     logger.info("Wrote %s", parity_path)
 
-    return {
+    # ---------- NEW: evaluate on *test* portfolios: truth (residual_bps) vs prediction ----------
+    def _evaluate_test_portfolios() -> Optional[str]:
+        trades_path = art.get("trades_path")
+        if not trades_path or not Path(trades_path).exists():
+            logger.warning("test_portfolios_eval: trades.parquet not found; skipping.")
+            return None
+        trades = pd.read_parquet(trades_path)
+        # identify portfolio trades
+        m_pf = trades.get("is_portfolio")
+        if m_pf is None:
+            m_pf = trades.get("sale_condition4", pd.Series([""]*len(trades))).astype(str).str.upper().eq("P")
+        pf = trades[m_pf.fillna(False)].copy()
+        if len(pf) == 0:
+            logger.warning("test_portfolios_eval: no portfolio trades present; skipping.")
+            return None
+
+        # add node_id via isin
+        pf["node_id"] = pf["isin"].map(isin2nid).astype("Int64")
+
+        # map trade_dt to date_idx via market_index, then join to samples to get split
+        if market_index is not None and "trade_dt" in pf.columns:
+            idx_map = {pd.Timestamp(r.asof_date).normalize(): int(r.row_idx) for r in market_index.itertuples(index=False)}
+            pf["trade_dt_norm"] = pd.to_datetime(pf["trade_dt"], errors="coerce").dt.normalize()
+            pf["date_idx"] = pf["trade_dt_norm"].map(idx_map).astype("Int64")
+            joined = pf.merge(
+                samples[["node_id","date_idx","split"]],
+                on=["node_id","date_idx"],
+                how="left",
+                suffixes=("","_s")
+            )
+            test_pf = joined[joined["split"].fillna("train") != "train"].copy()
+        else:
+            # fallback: if we cannot map to split, use all portfolios
+            test_pf = pf.copy()
+
+        if len(test_pf) == 0:
+            logger.warning("test_portfolios_eval: zero matching test portfolios; skipping.")
+            return None
+
+        # group by basket (portfolio_id + trade_dt), score each basket
+        # build rows with portfolio_id to enable runtime context
+        test_pf["asof_date"] = pd.to_datetime(test_pf.get("trade_dt", test_pf.get("report_time", test_pf.get("exec_time"))), errors="coerce").dt.normalize()
+        keys = [k for k in ("portfolio_id","trade_dt") if k in test_pf.columns]
+        if not keys:
+            keys = ["trade_dt"]
+        out_rows = []
+        for (gvals), gdf in test_pf.groupby(keys):
+            grows = []
+            pid = gdf["portfolio_id"].iloc[0] if "portfolio_id" in gdf.columns else f"PF_TEST_{hash(gvals)%10**6:06d}"
+            for r in gdf.itertuples(index=False):
+                grows.append({
+                    "portfolio_id": pid,
+                    "isin": str(r.isin),
+                    "side": str(r.side),
+                    "size": float(r.size),
+                    "asof_date": str(pd.Timestamp(getattr(r, "asof_date")).date()) if not pd.isna(getattr(r, "asof_date")) else "",
+                })
+            y = scorer.score_many(grows)
+            # collect truth + pred
+            for (rr, yp) in zip(gdf.to_dict("records"), y):
+                out_rows.append({
+                    "portfolio_id": rr.get("portfolio_id", pid),
+                    "trade_dt": str(pd.Timestamp(rr.get("trade_dt")).date()) if rr.get("trade_dt") is not None else "",
+                    "isin": rr["isin"],
+                    "side": rr["side"],
+                    "size": float(rr["size"]),
+                    "pred_bps": float(yp),
+                    "residual_bps": float(rr.get("residual_bps", np.nan)),
+                })
+        out_df = pd.DataFrame(out_rows)
+        # attach basket size
+        if len(out_df) > 0:
+            out_df["pf_size"] = out_df.groupby(["portfolio_id","trade_dt"])["isin"].transform("size")
+        out_path = out_dir / "test_portfolios_eval.csv"
+        out_df.to_csv(out_path, index=False)
+        logger.info("Wrote %s (n=%d rows across %d baskets)", out_path, len(out_df), out_df.groupby(["portfolio_id","trade_dt"]).ngroups)
+        return str(out_path)
+
+    test_eval_path = _evaluate_test_portfolios()
+
+    # ---------- NEW: single‑line pseudo‑portfolio vs baseline (no context) on test non‑portfolio trades ----------
+    def _evaluate_single_line(max_rows: int = 1000) -> Optional[str]:
+        trades_path = art.get("trades_path")
+        if not trades_path or not Path(trades_path).exists():
+            logger.warning("single_line_eval: trades.parquet not found; skipping.")
+            return None
+        tdf = pd.read_parquet(trades_path)
+        # non-portfolio trades mask
+        m_pf = tdf.get("is_portfolio")
+        if m_pf is None:
+            m_pf = tdf.get("sale_condition4", pd.Series([""]*len(tdf))).astype(str).str.upper().eq("P")
+        nonpf = tdf[~m_pf.fillna(False)].copy()
+        if "trade_dt" in nonpf.columns:
+            nonpf["asof_date"] = pd.to_datetime(nonpf["trade_dt"], errors="coerce").dt.normalize()
+        else:
+            nonpf["asof_date"] = pd.to_datetime(nonpf.get("report_time", nonpf.get("exec_time")), errors="coerce").dt.normalize()
+
+        # attach node_id + date_idx + split to select *test* non-portfolio trades
+        if market_index is not None:
+            idx_map = {pd.Timestamp(r.asof_date).normalize(): int(r.row_idx) for r in market_index.itertuples(index=False)}
+            nonpf["node_id"] = nonpf["isin"].map(isin2nid).astype("Int64")
+            nonpf["date_idx"] = nonpf["asof_date"].map(idx_map).astype("Int64")
+            merged = nonpf.merge(
+                samples[["node_id","date_idx","split"]],
+                on=["node_id","date_idx"],
+                how="left",
+                suffixes=("","_s")
+            )
+            nonpf_test = merged[merged["split"].fillna("train") != "train"].copy()
+        else:
+            nonpf_test = nonpf.copy()
+
+        if len(nonpf_test) == 0:
+            logger.warning("single_line_eval: zero matching non-portfolio test trades; skipping.")
+            return None
+
+        # sample for speed
+        if len(nonpf_test) > max_rows:
+            nonpf_test = nonpf_test.sample(n=max_rows, random_state=seed)
+
+        rows_nopf = []
+        rows_pf1  = []
+        for i, r in enumerate(nonpf_test.itertuples(index=False)):
+            base = {
+                "isin": str(r.isin),
+                "side": str(r.side),
+                "size": float(r.size),
+                "asof_date": str(pd.Timestamp(getattr(r, "asof_date")).date()) if not pd.isna(getattr(r, "asof_date")) else "",
+            }
+            rows_nopf.append(base)
+            rows_pf1.append({**base, "portfolio_id": f"SINGLE_{i:06d}"})
+
+        y_nopf = _direct_forward(Path(model_dir), rows_nopf, device=device_str)
+        y_pf1  = scorer.score_many(rows_pf1)
+        out = pd.DataFrame({
+            "isin": [r["isin"] for r in rows_nopf],
+            "side": [r["side"] for r in rows_nopf],
+            "size": [r["size"] for r in rows_nopf],
+            "asof_date": [r["asof_date"] for r in rows_nopf],
+            "pred_noctx_bps": y_nopf.astype(float),
+            "pred_pf1_bps": y_pf1.astype(float),
+        })
+        out["diff_bps"] = out["pred_pf1_bps"] - out["pred_noctx_bps"]
+        out_path = out_dir / "single_line_eval.csv"
+        out.to_csv(out_path, index=False)
+        logger.info("Wrote %s (n=%d)", out_path, len(out))
+        return str(out_path)
+
+    single_line_path = _evaluate_single_line()
+
+    # Return paths
+    out = {
         "warm_scenarios": str(out_dir / "warm_scenarios.csv"),
         "cold_scenarios": str(out_dir / "cold_scenarios.csv"),
         "portfolio_drift": str(out_dir / "portfolio_drift.csv"),
         "ablation": str(out_dir / "ablation.csv"),
-        "negative_drag": str(out_dir / "negative_drag.csv"),
         "parity": str(out_dir / "parity.csv"),
     }
+    if test_eval_path: out["test_portfolios_eval"] = test_eval_path
+    if single_line_path: out["single_line_eval"] = single_line_path
+    return out
