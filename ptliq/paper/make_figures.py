@@ -31,6 +31,7 @@ class TableBundle:
     drift: Optional[pd.DataFrame]
     ablation: Optional[pd.DataFrame]
     parity: Optional[pd.DataFrame]
+    negative_drag: Optional[pd.DataFrame]
     test_pf: Optional[pd.DataFrame]
     single_line: Optional[pd.DataFrame]
 
@@ -55,6 +56,7 @@ def load_tables(tables_dir: Path) -> TableBundle:
     drift = _read_csv_safe(t / "portfolio_drift.csv")
     abla  = _read_csv_safe(t / "ablation.csv")
     par   = _read_csv_safe(t / "parity.csv")
+    negd  = _read_csv_safe(t / "negative_drag.csv")
     test_pf = _read_csv_safe(t / "test_portfolios_eval.csv")
     single_line = _read_csv_safe(t / "single_line_eval.csv")
 
@@ -64,7 +66,7 @@ def load_tables(tables_dir: Path) -> TableBundle:
 
     return TableBundle(
         warm=_norm(warm), cold=_norm(cold), drift=_norm(drift),
-        ablation=_norm(abla), parity=_norm(par),
+        ablation=_norm(abla), parity=_norm(par), negative_drag=_norm(negd),
         test_pf=_norm(test_pf), single_line=_norm(single_line)
     )
 
@@ -223,6 +225,18 @@ def _render_figs(tables: TableBundle, out: Path, fmts: Tuple[str, ...] = FORMATS
             _hist_with_kde(s, title, "|Δ| (bps)", color="C3"),
             out, "fig_portfolio_drift_hist", fmts)
 
+    # ---- Negative drag by side (optional)
+    if tables.negative_drag is not None and len(tables.negative_drag) > 0:
+        nd = tables.negative_drag.copy()
+        # Expect columns: side, delta_bps
+        try:
+            items = [(str(r.side), float(r.delta_bps)) for r in nd.itertuples(index=False)]
+            saved["fig_negative_drag"] = _save_figure(
+                _two_bar(items, "Negative drag by side", "Δ (bps)"),
+                out, "fig_negative_drag", fmts)
+        except Exception:
+            pass
+
     # ---- Ablation
     if tables.ablation is not None and len(tables.ablation) > 0:
         full = float(tables.ablation.get("delta_full_bps", pd.Series([np.nan])).iloc[0])
@@ -247,6 +261,15 @@ def _render_figs(tables: TableBundle, out: Path, fmts: Tuple[str, ...] = FORMATS
                                       "Unseen portfolios: prediction vs truth (bps)",
                                       hue=hue),
                 out, "fig_test_pf_scatter", fmts)
+            # Basket-level aggregation: average per (portfolio_id, trade_dt) when available
+            keys = [k for k in ("portfolio_id","trade_dt") if k in df.columns]
+            if keys:
+                agg = df.dropna(subset=["pred_bps","residual_bps"]).groupby(keys).agg({"pred_bps":"mean","residual_bps":"mean"}).reset_index()
+                if len(agg) >= 2:
+                    saved["fig_test_pf_basket_scatter"] = _save_figure(
+                        _scatter_pred_vs_true(agg, "pred_bps", "residual_bps",
+                                              "Unseen portfolios: basket mean prediction vs truth (bps)"),
+                        out, "fig_test_pf_basket_scatter", fmts)
 
     # ---- Single-line behavior
     if tables.single_line is not None and len(tables.single_line) > 0:
@@ -254,7 +277,7 @@ def _render_figs(tables: TableBundle, out: Path, fmts: Tuple[str, ...] = FORMATS
         # Difference hist
         if "diff_bps" in s.columns:
             saved["fig_single_line_diff_hist"] = _save_figure(
-                _hist_with_kde(s["diff_bps"], "Single‑line portfolios behave like baseline trades", "Δ (with‑pf – no‑pf) (bps)", color="C4"),
+                _hist_with_kde(s["diff_bps"], "Single‑line vs baseline: difference histogram", "Δ (with‑pf – no‑pf) (bps)", color="C4"),
                 out, "fig_single_line_diff_hist", fmts)
         # Parity scatter
         if {"pred_noctx_bps", "pred_pf1_bps"}.issubset(s.columns):
