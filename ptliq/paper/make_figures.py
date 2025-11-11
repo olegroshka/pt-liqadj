@@ -180,7 +180,14 @@ def _scatter_pred_vs_true(
                 transform=ax.transAxes, ha="left", va="top")
     ax.set_title(title)
     ax.set_xlabel("Prediction (bps)")
-    ax.set_ylabel("Truth: residual (bps)")
+    # Pick a clearer Y label based on the provided y_col
+    ylab = "Truth (bps)"
+    yl = y_col.lower()
+    if "resid" in yl:
+        ylab = "Truth: residual (bps)"
+    elif "y_bps" in yl or yl.endswith("y"):
+        ylab = "Truth: y (bps)"
+    ax.set_ylabel(ylab)
     return fig
 
 # -----------------------------
@@ -200,6 +207,14 @@ def _render_figs(tables: TableBundle, out: Path, fmts: Tuple[str, ...] = FORMATS
         saved["fig_warm_side_flip"] = _save_figure(
             _hist_with_kde(wd["AC"], "Warm: side flip (C–A)", "Δ (bps)", color="C2"),
             out, "fig_warm_side_flip", fmts)
+        # Added magnitude-only view to normalize by side
+        try:
+            ac_abs = pd.to_numeric(wd["AC"], errors="coerce").abs()
+            saved["fig_warm_side_flip_abs"] = _save_figure(
+                _hist_with_kde(ac_abs, "Warm: |side flip| (|C–A|)", "|Δ| (bps)", color="C2"),
+                out, "fig_warm_side_flip_abs", fmts)
+        except Exception:
+            pass
         # Only render D–A if any data present
         if pd.to_numeric(wd["AD"], errors="coerce").dropna().size > 0:
             saved["fig_warm_time_roll"] = _save_figure(
@@ -255,6 +270,7 @@ def _render_figs(tables: TableBundle, out: Path, fmts: Tuple[str, ...] = FORMATS
             hue = "pf_lines"
         else:
             hue = None
+        # 1) Raw residual vs raw pred (legacy)
         if {"pred_bps", "residual_bps"}.issubset(df.columns):
             saved["fig_test_pf_scatter"] = _save_figure(
                 _scatter_pred_vs_true(df, "pred_bps", "residual_bps",
@@ -270,6 +286,80 @@ def _render_figs(tables: TableBundle, out: Path, fmts: Tuple[str, ...] = FORMATS
                         _scatter_pred_vs_true(agg, "pred_bps", "residual_bps",
                                               "Unseen portfolios: basket mean prediction vs truth (bps)"),
                         out, "fig_test_pf_basket_scatter", fmts)
+        # 2) Aligned comparisons when pi_ref available
+        if {"pred_residual_bps","residual_bps"}.issubset(df.columns):
+            saved["fig_test_pf_scatter_resid"] = _save_figure(
+                _scatter_pred_vs_true(df, "pred_residual_bps", "residual_bps",
+                                      "Unseen portfolios: prediction(resid) vs truth(resid) (bps)",
+                                      hue=hue),
+                out, "fig_test_pf_scatter_resid", fmts)
+            keys = [k for k in ("portfolio_id","trade_dt") if k in df.columns]
+            if keys:
+                agg = df.dropna(subset=["pred_residual_bps","residual_bps"]).groupby(keys).agg({"pred_residual_bps":"mean","residual_bps":"mean"}).reset_index()
+                if len(agg) >= 2:
+                    saved["fig_test_pf_basket_scatter_resid"] = _save_figure(
+                        _scatter_pred_vs_true(agg, "pred_residual_bps", "residual_bps",
+                                              "Unseen portfolios: basket mean prediction(resid) vs truth(resid) (bps)"),
+                        out, "fig_test_pf_basket_scatter_resid", fmts)
+        if {"pred_y_bps","truth_y_bps"}.issubset(df.columns):
+            saved["fig_test_pf_scatter_y"] = _save_figure(
+                _scatter_pred_vs_true(df, "pred_y_bps", "truth_y_bps",
+                                      "Unseen portfolios: prediction vs truth(y_bps) (bps)",
+                                      hue=hue),
+                out, "fig_test_pf_scatter_y", fmts)
+            keys = [k for k in ("portfolio_id","trade_dt") if k in df.columns]
+            if keys:
+                agg = df.dropna(subset=["pred_y_bps","truth_y_bps"]).groupby(keys).agg({"pred_y_bps":"mean","truth_y_bps":"mean"}).reset_index()
+                if len(agg) >= 2:
+                    saved["fig_test_pf_basket_scatter_y"] = _save_figure(
+                        _scatter_pred_vs_true(agg, "pred_y_bps", "truth_y_bps",
+                                              "Unseen portfolios: basket mean prediction vs truth(y_bps) (bps)"),
+                        out, "fig_test_pf_basket_scatter_y", fmts)
+
+    # ---- Additional A/B no-portfolio vs portfolio figures for test portfolios
+    if tables.test_pf is not None and len(tables.test_pf) > 0:
+        df = tables.test_pf.copy()
+        # Residual path A/B: nopf vs truth (row-level)
+        if {"pred_residual_bps_nopf","residual_bps"}.issubset(df.columns):
+            saved["fig_test_pf_scatter_resid_nopf"] = _save_figure(
+                _scatter_pred_vs_true(df, "pred_residual_bps_nopf", "residual_bps",
+                                      "Unseen portfolios (no‑pf): prediction(resid) vs truth(resid) (bps)"),
+                out, "fig_test_pf_scatter_resid_nopf", fmts)
+            keys = [k for k in ("portfolio_id","trade_dt") if k in df.columns]
+            if keys:
+                agg = df.dropna(subset=["pred_residual_bps_nopf","residual_bps"]).groupby(keys).agg({"pred_residual_bps_nopf":"mean","residual_bps":"mean"}).reset_index()
+                if len(agg) >= 2:
+                    saved["fig_test_pf_basket_scatter_resid_nopf"] = _save_figure(
+                        _scatter_pred_vs_true(agg, "pred_residual_bps_nopf", "residual_bps",
+                                              "Unseen portfolios (no‑pf): basket mean prediction(resid) vs truth(resid) (bps)"),
+                        out, "fig_test_pf_basket_scatter_resid_nopf", fmts)
+        # y_bps path A/B: nopf vs truth_y_bps (row-level)
+        if {"pred_y_bps_nopf","truth_y_bps"}.issubset(df.columns):
+            saved["fig_test_pf_scatter_y_nopf"] = _save_figure(
+                _scatter_pred_vs_true(df, "pred_y_bps_nopf", "truth_y_bps",
+                                      "Unseen portfolios (no‑pf): prediction vs truth(y_bps) (bps)"),
+                out, "fig_test_pf_scatter_y_nopf", fmts)
+            keys = [k for k in ("portfolio_id","trade_dt") if k in df.columns]
+            if keys:
+                agg = df.dropna(subset=["pred_y_bps_nopf","truth_y_bps"]).groupby(keys).agg({"pred_y_bps_nopf":"mean","truth_y_bps":"mean"}).reset_index()
+                if len(agg) >= 2:
+                    saved["fig_test_pf_basket_scatter_y_nopf"] = _save_figure(
+                        _scatter_pred_vs_true(agg, "pred_y_bps_nopf", "truth_y_bps",
+                                              "Unseen portfolios (no‑pf): basket mean prediction vs truth(y_bps) (bps)"),
+                        out, "fig_test_pf_basket_scatter_y_nopf", fmts)
+        # Histogram of with‑pf minus no‑pf residual predictions
+        if {"pred_residual_bps","pred_residual_bps_nopf"}.issubset(df.columns):
+            d = pd.to_numeric(df["pred_residual_bps"], errors="coerce") - pd.to_numeric(df["pred_residual_bps_nopf"], errors="coerce")
+            saved["fig_test_pf_resid_diff_hist"] = _save_figure(
+                _hist_with_kde(d, "Portfolio effect on residual predictions (with‑pf − no‑pf)", "Δ (bps)", color="C5"),
+                out, "fig_test_pf_resid_diff_hist", fmts)
+            keys = [k for k in ("portfolio_id","trade_dt") if k in df.columns]
+            if keys:
+                agg_pf = df.groupby(keys).agg({"pred_residual_bps":"mean","pred_residual_bps_nopf":"mean"}).reset_index()
+                d2 = pd.to_numeric(agg_pf["pred_residual_bps"], errors="coerce") - pd.to_numeric(agg_pf["pred_residual_bps_nopf"], errors="coerce")
+                saved["fig_test_pf_basket_resid_diff_hist"] = _save_figure(
+                    _hist_with_kde(d2, "Basket mean portfolio effect (with‑pf − no‑pf)", "Δ (bps)", color="C6"),
+                    out, "fig_test_pf_basket_resid_diff_hist", fmts)
 
     # ---- Single-line behavior
     if tables.single_line is not None and len(tables.single_line) > 0:

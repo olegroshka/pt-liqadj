@@ -1034,7 +1034,7 @@ class DGTScorer:
 
     @torch.no_grad()
     @torch.no_grad()
-    def score_many(self, rows: List[Dict[str, Any]]) -> np.ndarray:
+    def score_many(self, rows: List[Dict[str, Any]], ignore_portfolio: bool = False) -> np.ndarray:
         if not rows:
             return np.zeros((0,), dtype=np.float32)
 
@@ -1089,34 +1089,35 @@ class DGTScorer:
                     idxs.append(int(idx_arr[pos]))
             market_feat = self.mkt_ctx["mkt_feat"].index_select(0, torch.as_tensor(idxs, dtype=torch.long, device=self.device))
             # z-score and orientation sign (if preproc artifacts are present)
-            if self._mkt_apply and (self._mkt_mean is not None) and (self._mkt_std is not None):
+            # Always apply z-score and orientation sign when preproc stats are available
+            if (self._mkt_mean is not None) and (self._mkt_std is not None):
                 denom_m = torch.where(self._mkt_std <= 0, torch.ones_like(self._mkt_std), self._mkt_std)
                 market_feat = (market_feat - self._mkt_mean) / denom_m
                 market_feat = torch.nan_to_num(market_feat, nan=0.0, posinf=0.0, neginf=0.0)
-                if getattr(self, "_mkt_sign", None) is not None:
-                    market_feat = market_feat * float(self._mkt_sign)
+                market_feat = market_feat * float(getattr(self, "_mkt_sign", 1.0))
 
-        # --- portfolio context: ONLY if the request provides pf info
-        any_pf_gid = any(("pf_gid" in r) and (r["pf_gid"] is not None) for r in rows)
-        any_pid    = any((r.get("portfolio_id") is not None) for r in rows)
+        # --- portfolio context: ONLY if the request provides pf info and we don't ignore it
         port_ctx = None
         pf_gid   = None
-        if any_pf_gid:
-            # explicit pf_gid vector from request
-            pf_list = []
-            for r in rows:
-                try:
-                    pf_list.append(int(r.get("pf_gid", -1)))
-                except Exception:
-                    pf_list.append(-1)
-            pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
-            port_ctx = _build_runtime_port_ctx_from_explicit_gid(rows, node_ids, self.device)
-            if (port_ctx is None) and any_pid:
-                # fall back to runtime grouping by portfolio_id
+        if not ignore_portfolio:
+            any_pf_gid = any(("pf_gid" in r) and (r["pf_gid"] is not None) for r in rows)
+            any_pid    = any((r.get("portfolio_id") is not None) for r in rows)
+            if any_pf_gid:
+                # explicit pf_gid vector from request
+                pf_list = []
+                for r in rows:
+                    try:
+                        pf_list.append(int(r.get("pf_gid", -1)))
+                    except Exception:
+                        pf_list.append(-1)
+                pf_gid = torch.as_tensor(pf_list, dtype=torch.long, device=self.device)
+                port_ctx = _build_runtime_port_ctx_from_explicit_gid(rows, node_ids, self.device)
+                if (port_ctx is None) and any_pid:
+                    # fall back to runtime grouping by portfolio_id
+                    port_ctx, pf_gid = _build_runtime_port_ctx(rows, node_ids, self.device)
+            elif any_pid:
+                # runtime grouping by portfolio_id
                 port_ctx, pf_gid = _build_runtime_port_ctx(rows, node_ids, self.device)
-        elif any_pid:
-            # runtime grouping by portfolio_id
-            port_ctx, pf_gid = _build_runtime_port_ctx(rows, node_ids, self.device)
         # else: keep portfolio path OFF (pf_gid=None, port_ctx=None)
 
         # Debug: portfolio context info before model call

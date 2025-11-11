@@ -456,8 +456,8 @@ def _direct_forward(
 def score_scenarios(
     model_dir: Path,
     out_dir: Path,
-    n_warm_groups: int = 3,
-    reps_per_group: int = 2,
+    n_warm_groups: int = 10,
+    reps_per_group: int = 3,
     seed: int = 100,
 ) -> Dict[str, str]:
     """
@@ -610,9 +610,10 @@ def score_scenarios(
 
     rows_A, rows_B, abs_deltas = [], [], []
     K = min(8, len(reps))  # use up to 8 anchors
-    BASKET_K = 10          # ~10-line portfolios as requested
-    CO_SIZE_BUY = 1.5e5
-    CO_SIZE_SELL = 2.5e5
+    # Intensify baskets to expose portfolio context signal a bit more
+    BASKET_K = 15          # ~15-line portfolios per anchor
+    CO_SIZE_BUY = 5e5      # larger co-item DV01 for BUY basket
+    CO_SIZE_SELL = 1.5e6   # much heavier SELL pressure for B-basket
 
     def _asof(di: int) -> str:
         return _asof_for_idx(di) if mi is not None else ""
@@ -753,17 +754,42 @@ def score_scenarios(
                     "size": float(r.size),
                     "asof_date": str(pd.Timestamp(getattr(r, "asof_date")).date()) if not pd.isna(getattr(r, "asof_date")) else "",
                 })
-            y = scorer.score_many(grows)
+            y_pf = scorer.score_many(grows)
+            y_nopf = scorer.score_many(grows, ignore_portfolio=True)
             # collect truth + pred
-            for (rr, yp) in zip(gdf.to_dict("records"), y):
+            for (rr, yp, yq) in zip(gdf.to_dict("records"), y_pf, y_nopf):
+                # Try to recover pi_ref baseline to align targets
+                # Prefer explicit 'pi_ref_bps'; fallback to 'y_pi_ref_bps' (+ optional y_h_bps)
+                pi_ref = rr.get("pi_ref_bps", None)
+                if pi_ref is None:
+                    y_pi = rr.get("y_pi_ref_bps", None)
+                    if y_pi is not None:
+                        pi_ref = float(y_pi) + float(rr.get("y_h_bps", 0.0) or 0.0)
+                try:
+                    pi_ref = float(pi_ref) if pi_ref is not None else np.nan
+                except Exception:
+                    pi_ref = np.nan
+                resid_truth = float(rr.get("residual_bps", np.nan))
+                pred_bps = float(yp)
+                pred_bps_nopf = float(yq)
                 out_rows.append({
                     "portfolio_id": rr.get("portfolio_id", pid),
                     "trade_dt": str(pd.Timestamp(rr.get("trade_dt")).date()) if rr.get("trade_dt") is not None else "",
                     "isin": rr["isin"],
                     "side": rr["side"],
                     "size": float(rr["size"]),
-                    "pred_bps": float(yp),
-                    "residual_bps": float(rr.get("residual_bps", np.nan)),
+                    "pred_bps": pred_bps,
+                    "pred_bps_nopf": pred_bps_nopf,
+                    "residual_bps": resid_truth,
+                    "pi_ref_bps": pi_ref,
+                    # Aligned metrics
+                    # Model predicts residual directly; keep residual path equal to pred_bps values
+                    "pred_residual_bps": pred_bps,
+                    "pred_residual_bps_nopf": pred_bps_nopf,
+                    # Compose y_bps when baseline available
+                    "pred_y_bps": (pred_bps + pi_ref) if np.isfinite(pi_ref) else np.nan,
+                    "pred_y_bps_nopf": (pred_bps_nopf + pi_ref) if np.isfinite(pi_ref) else np.nan,
+                    "truth_y_bps": (resid_truth + pi_ref) if np.isfinite(pi_ref) and np.isfinite(resid_truth) else np.nan,
                 })
         out_df = pd.DataFrame(out_rows)
         # attach basket size
