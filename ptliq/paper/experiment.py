@@ -42,10 +42,12 @@ def _side_sign(x: Any) -> float:
     if x is None:
         return 0.0
     s = str(x).strip().upper()
-    if s in {"B","BUY","CBUY","TRUE","1"}:
-        return 1.0
-    if s in {"S","SELL","CSELL","FALSE","0","-1"}:
+    # Align with training/inference convention used across the project:
+    # BUY → -1.0, SELL/CSELL → +1.0
+    if s in {"B","BUY","Buy","CBUY","TRUE","1"}:
         return -1.0
+    if s in {"S","SELL","Sell","CSELL","FALSE","0","-1"}:
+        return 1.0
     return 0.0
 
 def _log_size(x: Any) -> float:
@@ -392,8 +394,33 @@ def _direct_forward(
         anchor_idx = torch.as_tensor(node_ids, dtype=torch.long, device=device)
 
         # trade
-        side = [_side_sign(r.get("side")) for r in rows]
-        lsz  = [_log_size(r.get("size")) for r in rows]
+        # side_sign: prefer explicit numeric field; else derive from side
+        side: List[float] = []
+        for r in rows:
+            if r.get("side_sign") is not None:
+                try:
+                    side.append(float(r.get("side_sign")))
+                except Exception:
+                    side.append(0.0)
+            else:
+                side.append(_side_sign(r.get("side")))
+        # log_size: prefer provided log_size; else use dv01_dollar; else fall back to notional size
+        lsz: List[float] = []
+        for r in rows:
+            if r.get("log_size") is not None:
+                try:
+                    lsz.append(float(r.get("log_size")))
+                    continue
+                except Exception:
+                    pass
+            if r.get("dv01_dollar") is not None:
+                try:
+                    v = float(r.get("dv01_dollar"))
+                    lsz.append(float(math.log1p(abs(v))))
+                    continue
+                except Exception:
+                    pass
+            lsz.append(_log_size(r.get("size")))
         n = len(rows)
         feat_cols = []
         for i, name in enumerate(fnames):
@@ -538,7 +565,8 @@ def score_scenarios(
         di = int(r.date_idx)
         asof = _asof_for_idx(di)
         base_size = float(np.expm1(float(r.log_size)))
-        base_side = "BUY" if float(r.side_sign) > 0 else "SELL"
+        # side_sign in samples uses BUY=-1, SELL=+1
+        base_side = "BUY" if float(r.side_sign) < 0 else "SELL"
 
         # A: identical
         warm_rows.append({"portfolio_id": f"PF-{int(r.pf_gid)}", "pf_gid": int(r.pf_gid),
@@ -578,7 +606,8 @@ def score_scenarios(
         di = int(r.date_idx)
         asof = _asof_for_idx(di)
         base_size = float(np.expm1(float(r.log_size)))
-        base_side = "BUY" if float(r.side_sign) > 0 else "SELL"
+        # side_sign in samples uses BUY=-1, SELL=+1
+        base_side = "BUY" if float(r.side_sign) < 0 else "SELL"
         # A
         cold_rows.append({"portfolio_id": f"PF-{int(r.pf_gid)}", "pf_gid": int(r.pf_gid),
                           "isin": asin, "side": base_side, "size": base_size, "asof_date": asof})
@@ -736,6 +765,15 @@ def score_scenarios(
             logger.warning("test_portfolios_eval: zero matching test portfolios; skipping.")
             return None
 
+        # Attach alternate ground-truth from samples.parquet (the exact training target)
+        # Join by (node_id, date_idx) to fetch samples.y for aligned comparison
+        try:
+            samp_y_cols = samples[["node_id","date_idx","y"]].copy()
+            samp_y_cols = samp_y_cols.rename(columns={"y": "truth_residual_from_samples_bps"})
+            test_pf = test_pf.merge(samp_y_cols, on=["node_id","date_idx"], how="left")
+        except Exception as _e:
+            logger.warning("test_portfolios_eval: failed to merge samples.y as alternate truth: %s", _e)
+
         # group by basket (portfolio_id + trade_dt), score each basket
         # build rows with portfolio_id to enable runtime context
         test_pf["asof_date"] = pd.to_datetime(test_pf.get("trade_dt", test_pf.get("report_time", test_pf.get("exec_time"))), errors="coerce").dt.normalize()
@@ -747,11 +785,21 @@ def score_scenarios(
             grows = []
             pid = gdf["portfolio_id"].iloc[0] if "portfolio_id" in gdf.columns else f"PF_TEST_{hash(gvals)%10**6:06d}"
             for r in gdf.itertuples(index=False):
+                # prefer dv01-dollar if available to match training; also pass log_size
+                dv = getattr(r, "dv01_dollar", np.nan)
+                try:
+                    dv = float(dv)
+                except Exception:
+                    dv = float("nan")
+                lz = float(np.log(abs(dv) + 1.0)) if np.isfinite(dv) else float("nan")
                 grows.append({
                     "portfolio_id": pid,
                     "isin": str(r.isin),
                     "side": str(r.side),
-                    "size": float(r.size),
+                    # Use DV01-dollar semantics for size/weights when available
+                    "size": float(dv) if np.isfinite(dv) else float(r.size),
+                    "dv01_dollar": float(dv) if np.isfinite(dv) else None,
+                    "log_size": float(lz) if np.isfinite(lz) else None,
                     "asof_date": str(pd.Timestamp(getattr(r, "asof_date")).date()) if not pd.isna(getattr(r, "asof_date")) else "",
                 })
             y_pf = scorer.score_many(grows)
@@ -772,6 +820,12 @@ def score_scenarios(
                 resid_truth = float(rr.get("residual_bps", np.nan))
                 pred_bps = float(yp)
                 pred_bps_nopf = float(yq)
+                # Alternate truth from samples (training target)
+                truth_resid_samples = rr.get("truth_residual_from_samples_bps", np.nan)
+                try:
+                    truth_resid_samples = float(truth_resid_samples)
+                except Exception:
+                    truth_resid_samples = np.nan
                 out_rows.append({
                     "portfolio_id": rr.get("portfolio_id", pid),
                     "trade_dt": str(pd.Timestamp(rr.get("trade_dt")).date()) if rr.get("trade_dt") is not None else "",
@@ -782,6 +836,8 @@ def score_scenarios(
                     "pred_bps_nopf": pred_bps_nopf,
                     "residual_bps": resid_truth,
                     "pi_ref_bps": pi_ref,
+                    # Ground truths
+                    "truth_residual_from_samples_bps": truth_resid_samples,
                     # Aligned metrics
                     # Model predicts residual directly; keep residual path equal to pred_bps values
                     "pred_residual_bps": pred_bps,
@@ -790,11 +846,37 @@ def score_scenarios(
                     "pred_y_bps": (pred_bps + pi_ref) if np.isfinite(pi_ref) else np.nan,
                     "pred_y_bps_nopf": (pred_bps_nopf + pi_ref) if np.isfinite(pi_ref) else np.nan,
                     "truth_y_bps": (resid_truth + pi_ref) if np.isfinite(pi_ref) and np.isfinite(resid_truth) else np.nan,
+                    "truth_y_from_samples_bps": (truth_resid_samples + pi_ref) if np.isfinite(pi_ref) and np.isfinite(truth_resid_samples) else np.nan,
                 })
         out_df = pd.DataFrame(out_rows)
         # attach basket size
         if len(out_df) > 0:
             out_df["pf_size"] = out_df.groupby(["portfolio_id","trade_dt"])["isin"].transform("size")
+        # Optional: write in-sample affine calibration columns to help investigate RMSE scale
+        try:
+            if {"pred_residual_bps","residual_bps"}.issubset(out_df.columns):
+                dx = pd.to_numeric(out_df["pred_residual_bps"], errors="coerce")
+                dy = pd.to_numeric(out_df["residual_bps"], errors="coerce")
+                m = pd.DataFrame({"x": dx, "y": dy}).dropna()
+                if len(m) >= 10:
+                    X = np.vstack([np.ones_like(m["x"].to_numpy()), m["x"].to_numpy()]).T
+                    coef, *_ = np.linalg.lstsq(X, m["y"].to_numpy(), rcond=None)
+                    a_cal = float(coef[0]); b_cal = float(coef[1])
+                    # store parameters for downstream inspection
+                    out_df["pred_residual_cal_bps"] = a_cal + b_cal * pd.to_numeric(out_df["pred_residual_bps"], errors="coerce")
+                    if "pred_residual_bps_nopf" in out_df.columns:
+                        out_df["pred_residual_cal_bps_nopf"] = a_cal + b_cal * pd.to_numeric(out_df["pred_residual_bps_nopf"], errors="coerce")
+                    # y-calibrated via same affine on residuals, then add baseline
+                    if "pi_ref_bps" in out_df.columns:
+                        pi = pd.to_numeric(out_df["pi_ref_bps"], errors="coerce")
+                        out_df["pred_y_cal_bps"] = out_df["pred_residual_cal_bps"] + pi
+                        if "pred_residual_cal_bps_nopf" in out_df.columns:
+                            out_df["pred_y_cal_bps_nopf"] = out_df["pred_residual_cal_bps_nopf"] + pi
+                    # remember the calibration used
+                    out_df["calibration_intercept"] = a_cal
+                    out_df["calibration_slope"] = b_cal
+        except Exception as _e:
+            logger.warning("test_portfolios_eval: calibration fit failed: %s", _e)
         out_path = out_dir / "test_portfolios_eval.csv"
         out_df.to_csv(out_path, index=False)
         logger.info("Wrote %s (n=%d rows across %d baskets)", out_path, len(out_df), out_df.groupby(["portfolio_id","trade_dt"]).ngroups)
@@ -845,10 +927,19 @@ def score_scenarios(
         rows_nopf = []
         rows_pf1  = []
         for i, r in enumerate(nonpf_test.itertuples(index=False)):
+            # Try to use dv01-dollar if present to align features; else keep size
+            dv = getattr(r, "dv01_dollar", np.nan)
+            try:
+                dv = float(dv)
+            except Exception:
+                dv = float("nan")
+            lz = float(np.log(abs(dv) + 1.0)) if np.isfinite(dv) else float("nan")
             base = {
                 "isin": str(r.isin),
                 "side": str(r.side),
-                "size": float(r.size),
+                "size": float(dv) if np.isfinite(dv) else float(r.size),
+                "dv01_dollar": float(dv) if np.isfinite(dv) else None,
+                "log_size": float(lz) if np.isfinite(lz) else None,
                 "asof_date": str(pd.Timestamp(getattr(r, "asof_date")).date()) if not pd.isna(getattr(r, "asof_date")) else "",
             }
             rows_nopf.append(base)
@@ -871,6 +962,203 @@ def score_scenarios(
         return str(out_path)
 
     single_line_path = _evaluate_single_line()
+
+    # ---------- Diagnostics: investigate RMSE gap vs samples.parquet ----------
+    try:
+        diag: Dict[str, Any] = {}
+
+        # 1) Train/val/test residual (samples.y) summary
+        def _summ(v: pd.Series) -> Dict[str, float]:
+            s = pd.to_numeric(v, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+            return {
+                "n": int(s.size),
+                "mean": float(s.mean()) if s.size else float("nan"),
+                "std": float(s.std()) if s.size else float("nan"),
+                "p50": float(s.quantile(0.5)) if s.size else float("nan"),
+                "p90": float(s.quantile(0.9)) if s.size else float("nan"),
+                "p10": float(s.quantile(0.1)) if s.size else float("nan"),
+            }
+
+        samples_y = pd.to_numeric(samples.get("y", pd.Series(dtype=float)), errors="coerce")
+        for sp in ("train", "val", "test"):
+            mask = samples.get("split", pd.Series([sp]*len(samples))).astype(str).eq(sp)
+            diag[f"samples_{sp}_y_stats"] = _summ(samples_y[mask])
+
+        # 2) If test_portfolios_eval exists, compute aligned bias/scale diagnostics
+        if test_eval_path and Path(test_eval_path).exists():
+            tdf = pd.read_csv(test_eval_path)
+            # residual path
+            if {"pred_residual_bps","residual_bps"}.issubset(tdf.columns):
+                px = pd.to_numeric(tdf["pred_residual_bps"], errors="coerce")
+                ty = pd.to_numeric(tdf["residual_bps"], errors="coerce")
+                m = pd.DataFrame({"px": px, "ty": ty}).dropna()
+                if len(m) > 0:
+                    diff = m["px"] - m["ty"]
+                    rmse = float(np.sqrt(np.mean((diff.values) ** 2)))
+                    mae = float(np.mean(np.abs(diff.values)))
+                    diag["test_pf_residual_bias"] = {
+                        "n": int(len(m)),
+                        "mean_pred": float(m["px"].mean()),
+                        "std_pred": float(m["px"].std()),
+                        "mean_truth": float(m["ty"].mean()),
+                        "std_truth": float(m["ty"].std()),
+                        "mean_diff": float(diff.mean()),
+                        "rmse": rmse,
+                        "mae": mae,
+                    }
+                    # simple affine calibration px ≈ a + b * ty
+                    try:
+                        tyc = m["ty"].to_numpy(); pxc = m["px"].to_numpy()
+                        A = np.vstack([np.ones_like(tyc), tyc]).T
+                        coef, *_ = np.linalg.lstsq(A, pxc, rcond=None)
+                        diag["test_pf_residual_affine_fit"] = {"intercept": float(coef[0]), "slope": float(coef[1])}
+                    except Exception:
+                        pass
+            # residual path vs samples.y alternate truth
+            if {"pred_residual_bps","truth_residual_from_samples_bps"}.issubset(tdf.columns):
+                px = pd.to_numeric(tdf["pred_residual_bps"], errors="coerce")
+                ty = pd.to_numeric(tdf["truth_residual_from_samples_bps"], errors="coerce")
+                m = pd.DataFrame({"px": px, "ty": ty}).dropna()
+                if len(m) > 0:
+                    diff = m["px"] - m["ty"]
+                    diag["test_pf_residual_bias_vs_samples_y"] = {
+                        "n": int(len(m)),
+                        "mean_pred": float(m["px"].mean()),
+                        "std_pred": float(m["px"].std()),
+                        "mean_truth": float(m["ty"].mean()),
+                        "std_truth": float(m["ty"].std()),
+                        "mean_diff": float(diff.mean()),
+                        "rmse": float(np.sqrt(np.mean((diff.values) ** 2))),
+                        "mae": float(np.mean(np.abs(diff.values))),
+                    }
+                    try:
+                        tyc = m["ty"].to_numpy(); pxc = m["px"].to_numpy()
+                        A = np.vstack([np.ones_like(tyc), tyc]).T
+                        coef, *_ = np.linalg.lstsq(A, pxc, rcond=None)
+                        diag["test_pf_residual_affine_fit_vs_samples_y"] = {"intercept": float(coef[0]), "slope": float(coef[1])}
+                    except Exception:
+                        pass
+            # y path
+            if {"pred_y_bps","truth_y_bps"}.issubset(tdf.columns):
+                px = pd.to_numeric(tdf["pred_y_bps"], errors="coerce")
+                ty = pd.to_numeric(tdf["truth_y_bps"], errors="coerce")
+                m = pd.DataFrame({"px": px, "ty": ty}).dropna()
+                if len(m) > 0:
+                    diff = m["px"] - m["ty"]
+                    rmse = float(np.sqrt(np.mean((diff.values) ** 2)))
+                    mae = float(np.mean(np.abs(diff.values)))
+                    diag["test_pf_y_bias"] = {
+                        "n": int(len(m)),
+                        "mean_pred": float(m["px"].mean()),
+                        "std_pred": float(m["px"].std()),
+                        "mean_truth": float(m["ty"].mean()),
+                        "std_truth": float(m["ty"].std()),
+                        "mean_diff": float(diff.mean()),
+                        "rmse": rmse,
+                        "mae": mae,
+                    }
+                    try:
+                        tyc = m["ty"].to_numpy(); pxc = m["px"].to_numpy()
+                        A = np.vstack([np.ones_like(tyc), tyc]).T
+                        coef, *_ = np.linalg.lstsq(A, pxc, rcond=None)
+                        diag["test_pf_y_affine_fit"] = {"intercept": float(coef[0]), "slope": float(coef[1])}
+                    except Exception:
+                        pass
+            # y path vs samples.y-based alternate truth
+            if {"pred_y_bps","truth_y_from_samples_bps"}.issubset(tdf.columns):
+                px = pd.to_numeric(tdf["pred_y_bps"], errors="coerce")
+                ty = pd.to_numeric(tdf["truth_y_from_samples_bps"], errors="coerce")
+                m = pd.DataFrame({"px": px, "ty": ty}).dropna()
+                if len(m) > 0:
+                    diff = m["px"] - m["ty"]
+                    diag["test_pf_y_bias_vs_samples_y"] = {
+                        "n": int(len(m)),
+                        "mean_pred": float(m["px"].mean()),
+                        "std_pred": float(m["px"].std()),
+                        "mean_truth": float(m["ty"].mean()),
+                        "std_truth": float(m["ty"].std()),
+                        "mean_diff": float(diff.mean()),
+                        "rmse": float(np.sqrt(np.mean((diff.values) ** 2))),
+                        "mae": float(np.mean(np.abs(diff.values))),
+                    }
+                    try:
+                        tyc = m["ty"].to_numpy(); pxc = m["px"].to_numpy()
+                        A = np.vstack([np.ones_like(tyc), tyc]).T
+                        coef, *_ = np.linalg.lstsq(A, pxc, rcond=None)
+                        diag["test_pf_y_affine_fit_vs_samples_y"] = {"intercept": float(coef[0]), "slope": float(coef[1])}
+                    except Exception:
+                        pass
+            # 4) In-sample calibration parameters if present on CSV
+            if {"calibration_intercept","calibration_slope"}.issubset(tdf.columns):
+                try:
+                    a_vals = pd.to_numeric(tdf["calibration_intercept"], errors="coerce").dropna()
+                    b_vals = pd.to_numeric(tdf["calibration_slope"], errors="coerce").dropna()
+                    if len(a_vals) > 0 and len(b_vals) > 0:
+                        diag["calibration_params_insample"] = {
+                            "intercept": float(a_vals.iloc[0]),
+                            "slope": float(b_vals.iloc[0]),
+                        }
+                    # Evaluate RMSE after calibration if columns exist
+                    if {"pred_residual_cal_bps","residual_bps"}.issubset(tdf.columns):
+                        px = pd.to_numeric(tdf["pred_residual_cal_bps"], errors="coerce")
+                        ty = pd.to_numeric(tdf["residual_bps"], errors="coerce")
+                        m2 = pd.DataFrame({"px": px, "ty": ty}).dropna()
+                        if len(m2) > 0:
+                            diff = m2["px"] - m2["ty"]
+                            diag["test_pf_residual_bias_after_cal"] = {
+                                "n": int(len(m2)),
+                                "mean_diff": float(diff.mean()),
+                                "rmse": float(np.sqrt(np.mean((diff.values) ** 2))),
+                                "mae": float(np.mean(np.abs(diff.values))),
+                            }
+                    if {"pred_y_cal_bps","truth_y_bps"}.issubset(tdf.columns):
+                        px = pd.to_numeric(tdf["pred_y_cal_bps"], errors="coerce")
+                        ty = pd.to_numeric(tdf["truth_y_bps"], errors="coerce")
+                        m2 = pd.DataFrame({"px": px, "ty": ty}).dropna()
+                        if len(m2) > 0:
+                            diff = m2["px"] - m2["ty"]
+                            diag["test_pf_y_bias_after_cal"] = {
+                                "n": int(len(m2)),
+                                "mean_diff": float(diff.mean()),
+                                "rmse": float(np.sqrt(np.mean((diff.values) ** 2))),
+                                "mae": float(np.mean(np.abs(diff.values))),
+                            }
+                except Exception:
+                    pass
+
+        # 3) Extended parity check: scorer vs direct on random non-portfolio rows
+        try:
+            # Choose up to 100 random train rows for determinism diagnostics
+            src = samples[samples.get("split").astype(str) != "train"] if "split" in samples.columns else samples
+            src = src.sample(n=min(100, len(src)), random_state=seed) if len(src) > 0 else src
+            rows = [{"isin": nid2isin[int(r.node_id)], "side": ("BUY" if float(r.side_sign) > 0 else "SELL"),
+                     "size": float(np.expm1(float(r.log_size))),
+                     "asof_date": _asof_for_idx(int(r.date_idx))} for r in src.itertuples(index=False)]
+            ps = scorer.score_many(rows) if len(rows) else np.array([], dtype=np.float32)
+            pdirect = _direct_forward(Path(model_dir), rows, device=device_str)
+            par_df = pd.DataFrame(rows)
+            par_df["pred_scorer_bps"] = ps
+            par_df["pred_direct_bps"] = pdirect
+            par_df["diff_bps"] = par_df["pred_scorer_bps"] - par_df["pred_direct_bps"]
+            parity_sample_path = out_dir / "parity_sample.csv"
+            par_df.to_csv(parity_sample_path, index=False)
+            diag["parity_sample_stats"] = {
+                "n": int(len(par_df)),
+                "mean_diff": float(pd.to_numeric(par_df["diff_bps"]).mean()) if len(par_df) else float("nan"),
+                "mad_diff": float(pd.to_numeric(par_df["diff_bps"]).abs().mean()) if len(par_df) else float("nan"),
+                "rmse_diff": float(np.sqrt(np.mean(np.square(pd.to_numeric(par_df["diff_bps"]).to_numpy())))) if len(par_df) else float("nan"),
+            }
+            diag["parity_sample_csv"] = str(parity_sample_path)
+        except Exception as _e:
+            diag["parity_sample_error"] = str(_e)
+
+        # 4) Write diagnostics json
+        diag_path = out_dir / "rmse_gap_diagnostics.json"
+        with open(diag_path, "w") as f:
+            json.dump(diag, f, indent=2)
+        logger.info("Wrote %s", diag_path)
+    except Exception as e:
+        logger.warning("Diagnostics generation failed: %s", e)
 
     # Return paths
     out = {

@@ -35,6 +35,19 @@ if {'pred_y_bps','truth_y_bps'}.issubset(df.columns):
     if 'pred_y_bps_nopf' in df.columns:
         pairs += [("ROW y_bps NO pf", 'pred_y_bps_nopf', 'truth_y_bps')]
 
+# New: alternate truths from samples.parquet (training target)
+if {'truth_residual_from_samples_bps'}.issubset(df.columns):
+    pairs += [
+        ("ROW resid WITH pf vs samples.y", 'pred_residual_bps', 'truth_residual_from_samples_bps'),
+        ("ROW resid NO pf vs samples.y",  'pred_residual_bps_nopf', 'truth_residual_from_samples_bps'),
+    ]
+if {'truth_y_from_samples_bps','pred_y_bps'}.issubset(df.columns):
+    pairs += [
+        ("ROW y_bps WITH pf vs samples.y", 'pred_y_bps', 'truth_y_from_samples_bps'),
+    ]
+    if 'pred_y_bps_nopf' in df.columns:
+        pairs += [("ROW y_bps NO pf vs samples.y", 'pred_y_bps_nopf', 'truth_y_from_samples_bps')]
+
 # Basket-level (mean per portfolio_id+trade_dt)
 keys = [k for k in ('portfolio_id','trade_dt') if k in df.columns]
 agg_results = []
@@ -53,6 +66,15 @@ if keys:
         pairs.append(("BASKET y_bps WITH pf", 'pred_y_bps', 'truth_y_bps'))
     if {'pred_y_bps_nopf','truth_y_bps'}.issubset(agg_df.columns):
         pairs.append(("BASKET y_bps NO pf", 'pred_y_bps_nopf', 'truth_y_bps'))
+    # New: vs samples truths
+    if {'pred_residual_bps','truth_residual_from_samples_bps'}.issubset(agg_df.columns):
+        pairs.append(("BASKET resid WITH pf vs samples.y", 'pred_residual_bps', 'truth_residual_from_samples_bps'))
+    if {'pred_residual_bps_nopf','truth_residual_from_samples_bps'}.issubset(agg_df.columns):
+        pairs.append(("BASKET resid NO pf vs samples.y", 'pred_residual_bps_nopf', 'truth_residual_from_samples_bps'))
+    if {'pred_y_bps','truth_y_from_samples_bps'}.issubset(agg_df.columns):
+        pairs.append(("BASKET y_bps WITH pf vs samples.y", 'pred_y_bps', 'truth_y_from_samples_bps'))
+    if {'pred_y_bps_nopf','truth_y_from_samples_bps'}.issubset(agg_df.columns):
+        pairs.append(("BASKET y_bps NO pf vs samples.y", 'pred_y_bps_nopf', 'truth_y_from_samples_bps'))
 else:
     agg_df = None
 

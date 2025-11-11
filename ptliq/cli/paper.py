@@ -74,10 +74,11 @@ def main() -> None:
     p2.set_defaults(func=_cmd_score_scenarios)
 
     # make-figures
-    p3 = sub.add_parser("make-figures", help="Create paper figures (PNG/PDF) from CSV tables")
+    p3 = sub.add_parser("make-figures", help="Create paper figures from CSV tables")
     p3.add_argument("--tables-dir", required=True, help="Folder containing CSVs from score-scenarios")
-    p3.add_argument("--out", required=True, help="Output folder for figures (PNG/PDF)")
-    p3.add_argument("--formats", nargs="*", default=("png", "pdf"), help="One or more formats, e.g. png pdf svg")
+    p3.add_argument("--out", required=True, help="Output folder for figures")
+    # Default is PNG-only; pass --formats pdf or --formats png pdf to include others explicitly
+    p3.add_argument("--formats", nargs="*", default=("png",), help="One or more formats, default png; e.g. --formats png pdf svg")
     p3.set_defaults(func=_cmd_make_figures)
 
     args = p.parse_args()

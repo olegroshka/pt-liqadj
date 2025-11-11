@@ -34,6 +34,8 @@ class MVDGTModelConfig:
     dropout: float = 0.10
     trade_dim: int = 2
     use_portfolio: bool = True
+    # deterministic negative drag (H-space cosine penalty); disabled by default
+    use_negative_drag: bool = False
     # graph view names (order matters if masks are stored per view)
     views: List[str] = field(default_factory=lambda: ["struct", "port", "corr_global", "corr_local"])
     # optional per-sample portfolio head
@@ -204,6 +206,7 @@ def train_mvdgt(cfg: MVDGTTrainConfig) -> dict:
         mkt_dim=int(cfg.model.mkt_dim or mkt_dim),
         use_portfolio=bool(cfg.model.use_portfolio),
         use_market=bool(cfg.model.use_market if cfg.model.use_market is not None else (mkt_dim > 0)),
+        use_negative_drag=bool(getattr(cfg.model, "use_negative_drag", False)),
         trade_dim=int(cfg.model.trade_dim),
         view_names=list(cfg.model.views),
         use_pf_head=bool(getattr(cfg.model, "use_pf_head", False)),

@@ -254,6 +254,7 @@ class MultiViewDGT(nn.Module):
         mkt_dim: int = 0,
         use_portfolio: bool = True,
         use_market: bool = True,
+        use_negative_drag: bool = False,
         trade_dim: int = 0,
         view_names: Optional[list[str]] = None,
         use_pf_head: bool = False,
@@ -277,6 +278,7 @@ class MultiViewDGT(nn.Module):
 
         self.use_portfolio = use_portfolio
         self.use_market = use_market and (mkt_dim > 0)
+        self.use_negative_drag = bool(use_negative_drag)
         self.use_pf_head = bool(use_pf_head)
         self.view_names = list(view_names) if (view_names is not None and len(view_names) > 0) else \
             ["struct", "port", "corr_global", "corr_local"]
@@ -674,7 +676,7 @@ class MultiViewDGT(nn.Module):
 
         # 8) Deterministic negative-drag based on H-space LOO prototypes (strict LOO, signless)
         # Use learned embedding space to align with the generator-implied portfolio direction.
-        if self.use_portfolio and (port_ctx is not None) and (pf_gid is not None):
+        if self.use_negative_drag and self.use_portfolio and (port_ctx is not None) and (pf_gid is not None):
             Vh_abs, _ = compute_samplewise_portfolio_vectors_loo(
                 h2, anchor_idx, pf_gid, port_ctx, l2_normalize=True
             )

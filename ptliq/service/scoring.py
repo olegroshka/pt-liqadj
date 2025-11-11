@@ -581,9 +581,11 @@ class GRUScorer:
 
 
 # -------------------- DGTScorer --------------------
+# Align runtime side_sign to training convention used in simulate/featurize:
+# TRAINING/GENERATOR CONVENTION: SELL = +1, BUY = -1
 SIDE_MAP = {
-    "B": 1.0, "BUY": 1.0, "CBUY": 1.0, True: 1.0, 1: 1.0,
-    "S": -1.0, "SELL": -1.0, "CSELL": -1.0, False: -1.0, 0: -1.0, -1: -1.0
+    "S": 1.0, "Sell": 1.0, "sell": 1.0, "SELL": 1.0, "CSELL": 1.0, False: 1.0, 0: 1.0, -1: 1.0,
+    "B": -1.0, "Buy": -1.0, "buy": -1.0, "BUY": -1.0, "CBUY": -1.0, True: -1.0, 1: -1.0
 }
 
 def _side_sign(x: Any) -> float:
@@ -640,12 +642,17 @@ def _build_runtime_port_ctx(
             continue
         any_pid = True
         side = _side_sign(r.get("side"))
+        # Prefer DV01-dollar semantics for portfolio mass; fall back to log_size then size
         try:
-            sz = float(r.get("size", 0.0))
+            if r.get("dv01_dollar") is not None:
+                a = abs(float(r.get("dv01_dollar")))
+            elif r.get("log_size") is not None:
+                a = float(np.expm1(float(r.get("log_size"))))
+            else:
+                a = abs(float(r.get("size", 0.0)))
         except Exception:
-            sz = 0.0
-        a = abs(sz)
-        s = (1.0 if side >= 0 else -1.0) * a
+            a = 0.0
+        s = float(side) * a
         groups[pid].append((i, int(node_ids[i]), a, s))
 
     if not any_pid:
@@ -722,12 +729,17 @@ def _build_runtime_port_ctx_from_explicit_gid(
         sgn_sizes: list[float] = []
         for i in idxs:
             side = _side_sign(rows[i].get("side"))
+            # Prefer DV01-dollar semantics for portfolio mass; fall back to log_size then size
             try:
-                sz = float(rows[i].get("size", 0.0))
+                if rows[i].get("dv01_dollar") is not None:
+                    a = abs(float(rows[i].get("dv01_dollar")))
+                elif rows[i].get("log_size") is not None:
+                    a = float(np.expm1(float(rows[i].get("log_size"))))
+                else:
+                    a = abs(float(rows[i].get("size", 0.0)))
             except Exception:
-                sz = 0.0
-            a = abs(sz)
-            s = (1.0 if side >= 0 else -1.0) * a
+                a = 0.0
+            s = float(side) * a
             abs_sizes.append(a)
             sgn_sizes.append(s)
         abs_arr = np.asarray(abs_sizes, dtype=np.float32)
@@ -1009,6 +1021,7 @@ class DGTScorer:
             mkt_dim=int(self._cfg_obj.mkt_dim or 0),
             use_portfolio=bool(self._cfg_obj.use_portfolio),
             use_market=bool(self._cfg_obj.use_market),
+            use_negative_drag=bool(getattr(self._cfg_obj, "use_negative_drag", False)),
             trade_dim=int(self._cfg_obj.trade_dim),
             view_names=list(getattr(self._cfg_obj, "views", ["struct","port","corr_global","corr_local"])),
             use_pf_head=bool(getattr(self._cfg_obj, "use_pf_head", False)),
@@ -1048,8 +1061,33 @@ class DGTScorer:
         anchor_idx = torch.as_tensor(node_ids, dtype=torch.long, device=self.device)
 
         # --- trade features (standardized with train-time scaler.json)
-        side = [_side_sign(r.get("side")) for r in rows]
-        lsz  = [_log_size(r.get("size")) for r in rows]
+        # side_sign: prefer explicit numeric field if provided
+        side = []
+        for r in rows:
+            if "side_sign" in r and r.get("side_sign") is not None:
+                try:
+                    side.append(float(r.get("side_sign")))
+                except Exception:
+                    side.append(0.0)
+            else:
+                side.append(_side_sign(r.get("side")))
+        # log_size: prefer provided log_size, else dv01_dollar, else notional size
+        lsz: list[float] = []
+        for r in rows:
+            if r.get("log_size") is not None:
+                try:
+                    lsz.append(float(r.get("log_size")))
+                    continue
+                except Exception:
+                    pass
+            if r.get("dv01_dollar") is not None:
+                try:
+                    v = float(r.get("dv01_dollar"))
+                    lsz.append(float(math.log1p(abs(v))))
+                    continue
+                except Exception:
+                    pass
+            lsz.append(_log_size(r.get("size")))
         side_t = torch.as_tensor(side, dtype=torch.float32, device=self.device)
         lsz_t  = torch.as_tensor(lsz,  dtype=torch.float32, device=self.device)
 
