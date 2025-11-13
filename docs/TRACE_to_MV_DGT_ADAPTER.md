@@ -176,6 +176,40 @@ bonds_out = bonds_out[a].reset_index(drop=True)
 trades_out.to_parquet(out_dir/"trades.parquet", index=False)
 bonds_out.to_parquet(out_dir/"bonds.parquet", index=False)
 print("Wrote:", out_dir/"trades.parquet", out_dir/"bonds.parquet")
+
+#residuals
+import numpy as np
+import pandas as pd
+
+def compute_residual_bps(trades: pd.DataFrame,
+                         exec_col: str = "price_clean_exec",
+                         ref_mid_col: str = "price_clean_ref_mid",
+                         side_col: str = "side") -> pd.DataFrame:
+    """
+    Returns a copy of `trades` with:
+      - residual_bps : signed price-bps (cents per $100), positive = worse for both BUY and SELL
+      - side_sign    : +1 for BUY/CBUY, -1 for SELL/CSELL (client view)
+    """
+    t = trades.copy()
+
+    # 1) Side sign (client view): BUY/CBUY = +1, SELL/CSELL = -1
+    side_map = {"BUY": 1.0, "CBUY": 1.0, "SELL": -1.0, "CSELL": -1.0}
+    t["side_sign"] = (
+        t[side_col].astype(str).str.upper().map(side_map).astype(float).fillna(0.0)
+    )
+
+    # 2) Clean prices (ensure numeric)
+    pe = pd.to_numeric(t[exec_col], errors="coerce")
+    pm = pd.to_numeric(t[ref_mid_col], errors="coerce")
+
+    # 3) Target in *price-bps* (cents per $100), positive = worse for both sides
+    t["residual_bps"] = t["side_sign"] * 100.0 * (pe - pm)
+
+    # Optional: sanity guards
+    t = t.dropna(subset=["residual_bps"]).copy()
+    t["residual_bps"] = t["residual_bps"].clip(-1e4, 1e4)  # avoid wild outliers
+    return t
+
 ```
 
 Notes:
