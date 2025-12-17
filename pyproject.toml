@@ -15,6 +15,7 @@ dependencies = [
     "rich",
     "torch",
     "torch-geometric",
+    "graphviz>=0.20.3",
     "fastapi",
     "uvicorn",
     "tensorboard",
@@ -61,6 +62,9 @@ ptliq-move = "ptliq.cli.move:app"
 ptliq-ig-oas = "ptliq.cli.ig_oas:app"
 ptliq-hy-oas = "ptliq.cli.hy_oas:app"
 ptliq-vix = "ptliq.cli.vix:app"
+
+# presentation diagram generator
+ptliq-dgt-arch = "ptliq.cli.mvdgt_arch_diagram:app"
 
 ptliq-train = "ptliq.cli.gat_train:app"
 ptliq-gat-train = "ptliq.cli.gat_train:app"

@@ -1,0 +1,71 @@
+digraph MV_DGT {
+	graph [fontname="Segoe UI, Roboto, Arial" fontsize=12 labelloc=t rankdir=LR splines=spline]
+	node [color="#CBD5E1" fillcolor="#F8FAFC" fontname="Segoe UI, Roboto, Arial" shape=box style="rounded,filled"]
+	edge [color="#64748B"]
+	subgraph cluster_graph {
+		color="#4C78A8" label="Multi‑View Graph Encoder (2 TransformerConv layers)"
+		NodeEnc [label="Node Feature Encoder
+(2‑layer MLP + ReLU + Dropout + LayerNorm)"]
+		Struct [label="Graph Convolution — Structural Edges
+(TransformerConv)"]
+		Port [label="Graph Convolution — Portfolio Co‑membership Edges
+(TransformerConv)"]
+		CorrG [label="Graph Convolution — Global Correlation Edges
+(TransformerConv, gated)"]
+		CorrL [label="Graph Convolution — Local Correlation Edges
+(TransformerConv, gated)"]
+		DiffFuse [label="Differential Fusion with Learnable Gates
+(Structural baseline + per‑view deviations)"]
+		NodeEnc -> Struct
+		Struct -> DiffFuse
+		NodeEnc -> Port
+		Port -> DiffFuse
+		NodeEnc -> CorrG
+		CorrG -> DiffFuse
+		NodeEnc -> CorrL
+		CorrL -> DiffFuse
+	}
+	Anchor [label="Anchor Selection
+(Gather focal node embedding z_anchor_pre)"]
+	DiffFuse -> Anchor
+	subgraph cluster_pf {
+		color="#F58518" label="Portfolio Prototype (Strict Leave‑One‑Out)"
+		Vabs [label="Absolute Portfolio Prototype V_abs
+(computed in graph embedding space H; L2‑normalized; anchor excluded)"]
+		PFProj [label="Portfolio Projection pf_proj
+([V_abs, 0] → hidden)"]
+		PFGate [label="Portfolio Residual Gate σ(pf_gate)"]
+		Vabs -> PFProj
+		PFProj -> PFGate
+	}
+	ZAnchor [label="Portfolio Residual Fusion
+z_anchor = z_anchor_pre − σ(pf_gate) · pf_proj([V_abs, 0])"]
+	Anchor -> ZAnchor
+	PFGate -> ZAnchor
+	subgraph cluster_ctx {
+		color="#54A24B" label="Sample‑Level Context Encoders"
+		Mkt [label="Market Context Encoder
+(MLP → hidden)"]
+		Trade [label="Trade / Microstructure Encoder
+(MLP → hidden)"]
+	}
+	Attn [label="Within‑Portfolio Self‑Attention (optional)
+TransformerEncoder over portfolio tokens"]
+	ZAnchor -> Attn
+	Mkt -> Attn
+	Trade -> Attn
+	PFHead [label="Portfolio Head (optional)
+MLP(V_abs) → hidden (gated)"]
+	Vabs -> PFHead
+	Head [label="Regression Head
+(Concatenate enabled branches → MLP → prediction ŷ)"]
+	ZAnchor -> Head
+	Mkt -> Head
+	Trade -> Head
+	PFHead -> Head
+	NegDrag [label="Deterministic Negative Drag (optional)
+Subtract c · |cos( normalize(z_anchor_pre), V_abs )|"]
+	Anchor -> NegDrag [style=dashed]
+	Vabs -> NegDrag [style=dashed]
+	NegDrag -> Head [style=dashed]
+}

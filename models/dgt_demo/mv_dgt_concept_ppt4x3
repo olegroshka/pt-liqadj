@@ -1,0 +1,110 @@
+digraph MV_DGT {
+	graph [dpi=300 fontname="Segoe UI, Roboto, Arial" fontsize=14 labelloc=t newrank=true nodesep=0.38 pad=0.25 rankdir=TB ranksep=0.55 size="12.0,9.0!" splines=spline]
+	node [color="#CBD5E1" fillcolor="#F8FAFC" fontname="Segoe UI, Roboto, Arial" fontsize=14 margin="0.16,0.11" shape=box style="rounded,filled"]
+	edge [color="#64748B"]
+	subgraph cluster_graph {
+		color="#4C78A8" label="Multi‑View Graph Encoder (2 TransformerConv layers)"
+		NodeEnc [label="Node Feature Encoder
+x∈R^{N×F} → H∈R^{N×D} via 2‑layer MLP + ReLU + Dropout + LayerNorm"]
+		Struct [label="Graph Convolution — Structural Edges
+(TransformerConv)"]
+		Port [label="Graph Convolution — Portfolio Co‑membership Edges
+(TransformerConv)"]
+		CorrG [label="Graph Convolution — Global Correlation Edges
+(TransformerConv, gated)"]
+		CorrL [label="Graph Convolution — Local Correlation Edges
+(TransformerConv, gated)"]
+		DiffFuse [label="Differential Fusion with Learnable Gates
+(Structural baseline + per‑view deviations)"]
+		NodeEnc -> Struct
+		Struct -> DiffFuse
+		NodeEnc -> Port
+		Port -> DiffFuse
+		NodeEnc -> CorrG
+		CorrG -> DiffFuse
+		NodeEnc -> CorrL
+		CorrL -> DiffFuse
+	}
+	Anchor [label="Anchor Selection
+z_anchor_pre ∈ R^{B×D} = H[anchor_idx]"]
+	DiffFuse -> Anchor [minlen=2]
+	subgraph cluster_pf {
+		color="#F58518" label="Portfolio Prototype (Strict Leave‑One‑Out)"
+		Vabs [label="Absolute Portfolio Prototype V_abs ∈ R^{B×D}
+strict LOO in H; L2‑normalized"]
+		PFProj [label="Projection pf_proj: R^{2D}→R^{D}
+([V_abs, 0] input)"]
+		PFGate [label="Residual gate σ(pf_gate) ∈ (0,1)"]
+		Vabs -> PFProj
+		PFProj -> PFGate
+	}
+	ZAnchor [label="Portfolio Residual Fusion
+z_anchor = z_anchor_pre − σ(pf_gate)·pf_proj([V_abs, 0]) ∈ R^{B×D}"]
+	Anchor -> ZAnchor
+	PFGate -> ZAnchor
+	subgraph cluster_ctx {
+		color="#54A24B" label="Sample‑Level Context Encoders"
+		Mkt [label="Market Context Encoder
+mkt_enc: R^{m}→R^{D}"]
+		Trade [label="Trade / Microstructure Encoder
+trade_enc: R^{t}→R^{D}"]
+	}
+	Attn [label="Within‑Portfolio Self‑Attention (optional)
+TransformerEncoder over portfolio tokens: R^{B×D}→R^{B×D}"]
+	ZAnchor -> Attn
+	Mkt -> Attn
+	Trade -> Attn
+	PFHead [label="Portfolio Head (optional)
+MLP(V_abs) → R^{D} (gated)"]
+	Vabs -> PFHead
+	Head [label="Regression Head
+concat(·) → MLP → ŷ ∈ R^{B}"]
+	ZAnchor -> Head
+	Mkt -> Head
+	Trade -> Head
+	PFHead -> Head
+	NegDrag [label="Deterministic Negative Drag (optional)
+ŷ ← ŷ − c·|cos( normalize(z_anchor_pre), V_abs )|"]
+	Anchor -> NegDrag [style=dashed]
+	Vabs -> NegDrag [style=dashed]
+	NegDrag -> Head [style=dashed]
+	subgraph rank_mid {
+		rank=same
+		ZAnchor
+		Head
+		Mkt
+		Trade
+		Attn
+		PFHead
+		NegDrag
+	}
+	ZAnchor -> Mkt [style=invis]
+	Mkt -> Trade [style=invis]
+	Trade -> Attn [style=invis]
+	Attn -> PFHead [style=invis]
+	PFHead -> Head [style=invis]
+	Head -> NegDrag [style=invis]
+	subgraph rank_top {
+		rank=source
+		NodeEnc
+		Struct
+		Port
+		CorrG
+		CorrL
+		DiffFuse
+	}
+	subgraph cluster_notes {
+		color="#94A3B8" label=""
+		Notes [label=<<b>Notes</b><BR ALIGN="LEFT"/>• Anchor: focal asset representation gathered from the Multi‑View Graph Encoder; serves as the per‑sample target for portfolio residual fusion.<BR ALIGN="LEFT"/>• Multi‑view fusion: structural edges act as a baseline; portfolio and correlation views contribute only their <i>deviations</i> from structural via learnable gates (differential fusion).<BR ALIGN="LEFT"/>• Strict LOO prototype V_abs: computed for the anchor’s portfolio group without the anchor itself; absolute‑weighted average in embedding space H; L2‑normalized to compare directions reliably.<BR ALIGN="LEFT"/>• Residual subtraction: z_anchor = z_anchor_pre − σ(pf_gate)·pf_proj([V_abs, 0]); removes shared portfolio drift while preserving anchor‑specific information.<BR ALIGN="LEFT"/>• Market / Trade encoders: add exogenous, sample‑level context (macro regime, microstructure). These are small MLPs projected to the shared hidden space.<BR ALIGN="LEFT"/>• Within‑portfolio self‑attention (optional): encodes interactions among items in the same portfolio batch group; used in residual or concat mode controlled by a learnable gate.<BR ALIGN="LEFT"/>• Portfolio head (optional): clean branch over V_abs to expose portfolio prototype features directly to the prediction head (gated).<BR ALIGN="LEFT"/>• Deterministic negative drag (optional): subtracts |cos(z_anchor_pre, V_abs)| scaled by a coefficient to bias outputs away from portfolio direction, improving conservativeness.<BR ALIGN="LEFT"/>• Training: standard regression head on concatenated features; typical objective is MSE/Huber with regularization; graph and portfolio paths trained end‑to‑end.<BR ALIGN="LEFT"/>• Typical shapes: x∈R^{N×F}, anchor_idx∈N^{B}, market_feat∈R^{B×m}, trade_feat∈R^{B×t}; hidden size H (shared across blocks).<BR ALIGN="LEFT"/>• Inference path: encode graph → gather anchor → subtract portfolio residual → add optional context/attention → predict via head; negative drag applied if enabled.<BR ALIGN="LEFT"/>> color="#CBD5E1" fillcolor="#FFFFFF" shape=box style="rounded,filled"]
+	}
+	ZAnchor -> Notes [style=invis]
+	Head -> Notes [style=invis]
+	Mkt -> Notes [style=invis]
+	Trade -> Notes [style=invis]
+	Attn -> Notes [style=invis]
+	PFHead -> Notes [style=invis]
+	subgraph rank_notes {
+		rank=sink
+		Notes
+	}
+}

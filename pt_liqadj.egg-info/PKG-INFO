@@ -1,0 +1,34 @@
+Metadata-Version: 2.4
+Name: pt-liqadj
+Version: 0.1.0
+License-File: LICENSE
+Requires-Dist: pydantic
+Requires-Dist: pyarrow
+Requires-Dist: pandas
+Requires-Dist: numpy
+Requires-Dist: pyyaml
+Requires-Dist: typer
+Requires-Dist: rich
+Requires-Dist: torch
+Requires-Dist: torch-geometric
+Requires-Dist: graphviz>=0.20.3
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Requires-Dist: tensorboard
+Requires-Dist: requests
+Requires-Dist: gradio==5.49.1
+Requires-Dist: matplotlib
+Requires-Dist: seaborn
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Requires-Dist: mypy; extra == "dev"
+Requires-Dist: types-PyYAML; extra == "dev"
+Provides-Extra: market
+Requires-Dist: yfinance; extra == "market"
+Requires-Dist: pandas_datareader; extra == "market"
+Requires-Dist: fredapi; extra == "market"
+Provides-Extra: paper
+Requires-Dist: onnxscript; extra == "paper"
+Dynamic: license-file

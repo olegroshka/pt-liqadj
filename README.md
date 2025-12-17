@@ -580,3 +580,205 @@ If you ever encounter a page stuck on "Loading…":
 If you plan to train/serve MV‑DGT on real markets (TRACE Enhanced + vendor reference/evaluated prices), see the step‑by‑step adapter guide:
 
 - docs/TRACE_to_MV_DGT_ADAPTER.md — maps TRACE/security‑master fields to the minimal trades.parquet and bonds.parquet schemas, includes a reference pandas adapter snippet, and shows how to run featurization/build steps.
+
+---
+
+## MV‑DGT architecture — detailed, presentation‑level overview
+
+This section explains the Multi‑View Differential Graph Transformer (MV‑DGT) used in this repo for portfolio‑aware signals. It is written for a first‑time reader and ties the concepts to the exact code paths in `ptliq/model/mv_dgt.py` and dataset tooling under `ptliq/features` and `ptliq/training`.
+
+Relevant files:
+- Model: `ptliq/model/mv_dgt.py` (class `MultiViewDGT`)
+- Dataset builder (views/masks): `ptliq/features/build_mvdgt_dataset.py`
+- Training loop: `ptliq/training/mvdgt_loop.py`
+- Example config: `configs/mvdgt.default.yaml`
+- Diagrams: `models/dgt_demo/mv_dgt_concept_*.{png,jpg}`
+
+### What MV‑DGT solves (intuitive)
+
+MV‑DGT learns a per‑trade signal for a focal asset (the “anchor”) while being explicitly aware of:
+- Multi‑view relations in a market graph (issuer/sector structure, portfolio co‑membership, and correlation‑based neighbors).
+- Portfolio context: a strict leave‑one‑out (LOO) prototype around the anchor to subtract common portfolio drift and keep stock/bond‑specific residuals.
+- Optional sample‑level features (market/trade) and optional within‑portfolio self‑attention capturing interactions among items in the same batch portfolio group.
+
+The model is compact and each part is gated, making ablations and diagnostics straightforward.
+
+### Inputs and core shapes
+
+Notation below follows the implementation in `mv_dgt.py`:
+- `x: [N, x_dim]` — per‑node features for the full universe (e.g., static or day‑specific graph node features).
+- `edge_index: [2, E]`, `edge_weight: [E, 1]` — global graph connectivity and initial weights (registered as buffers in the model).
+- Per‑view boolean masks (buffers): `mask_struct`, `mask_port`, `mask_corr_global`, `mask_corr_local` — same length `E` as `edge_index` columns.
+- `anchor_idx: [B]` — indices of focal nodes (the assets we predict on in this batch).
+- `pf_gid: [B]` — portfolio group id per sample; `-1` means “no portfolio context for this sample”.
+- `port_ctx: dict` — flattened portfolio context, see below.
+  - `port_nodes_flat: [L]` — node ids for all portfolio line items.
+  - `port_w_signed_flat: [L]` — signed weights (e.g., side‑signed size) per line.
+  - `port_w_abs_flat: [L]` (optional) — absolute weights; if missing, `abs(signed)` is used.
+  - `port_len: [G]` — item counts per portfolio group id.
+- Optional per‑sample features:
+  - `market_feat: [B, mkt_dim]` — market context features aligned by `date_idx`.
+  - `trade_feat: [B, trade_dim]` — side/size/urgency or other trade‑level signals.
+
+All shapes and semantics are exercised in unit tests under `tests/test_mvdgt_e2e.py` and by the training loop.
+
+### How the multi‑view relations are built
+
+The graph edges are prepared offline by your featurizer and stored as a PyG artifact (`pyg_graph.pt`) along with an `edge_type` vector that labels each edge with a relation id. The dataset builder groups those relations into 4 views and saves boolean masks `view_masks.pt` aligned to `edge_index` length (`E`). See `ptliq/features/build_mvdgt_dataset.py`:
+
+- Structural view (`struct`): relation names in `REL_STRUCT = {"ISSUER_SIBLING","SECTOR","RATING_NEAR","CURVE_BUCKET","CURRENCY"}`.
+  - SECTOR relations connect nodes sharing the same sector code.
+  - ISSUER_SIBLING connects bonds from the same issuer.
+  - RATING_NEAR can connect neighbors within a narrow rating band.
+  - CURVE_BUCKET and CURRENCY are other structural affinities.
+- Portfolio co‑membership (`port`): `REL_PORT = {"COTRADE_CO","COTRADE_X"}` — co‑occurred in the same portfolio/day. The exact meaning of “CO” vs “X” depends on featurizer choices (same account or cross‑account, etc.).
+- Correlation — global (`corr_global`): `REL_CG = {"PCC_GLOBAL","MI_GLOBAL"}`.
+- Correlation — local (`corr_local`): `REL_CL = {"PCC_LOCAL","MI_LOCAL"}`.
+
+The helper `_make_view_masks(edge_type, id_sets)` maps relation ids to these masks; the training loop validates that mask lengths match `E`.
+
+#### How sector relations are encoded (single or multiple taxonomies)
+
+- In the simplest case, each node has a single sector code (`node_to_sector`) and the featurizer emits edges labeled `SECTOR` between all pairs that share the sector. Those edges land in the structural view via the `SECTOR` relation id.
+- If you have multiple sector taxonomies (e.g., GICS level 1/2/3, or issuer industry vs sector), emit separate relation names like `SECTOR_L1`, `SECTOR_L2`, `INDUSTRY` and list them inside `REL_STRUCT`. The dataset builder will include those relation ids in the `struct` mask. Nodes with multiple sector memberships naturally produce multiple edges — one per taxonomy match — which the model can learn to weigh via per‑view attention and gates.
+- Edge weights: whatever the featurizer sets (e.g., 1.0 for unweighted structural links or a frequency/strength score). MV‑DGT standardizes edge weights per view on the fly to remove scale mismatch before message passing.
+
+#### Where masks and edges come from in practice
+
+- `pyg_graph.pt` contains `edge_index` and `edge_weight` (directed edges) and an `edge_type` vector.
+- `view_masks.pt` is a dict `{view_name: BoolTensor[E]}` built with `_build_view_ids` + `_make_view_masks` in `build_mvdgt_dataset.py`.
+- The training loop `_load_pyg_and_view_masks` (in `ptliq/training/mvdgt_loop.py`) loads these and puts them on the chosen device. It also writes a copy under the run directory for reproducibility.
+
+### Component breakdown and responsibilities
+
+The code maps 1‑to‑1 to the blocks below.
+
+1) Shared node encoder (per node)
+- `enc: Linear(x_dim→hidden) → ReLU → Dropout → Linear(hidden→hidden)`; then `LayerNorm` (`norm0`).
+- Lifts raw `x` into the shared embedding space `H: [N, hidden]`.
+
+2) Multi‑view graph encoder (two graph layers; per‑view TransformerConv + differential fusion)
+- For each view `v ∈ {struct, port, corr_global, corr_local}` we have a `TransformerConv(hidden→hidden)` in each layer: `conv1[v]` and `conv2[v]`.
+- Each layer has learnable per‑view scalar gates: `g1_logit[v]` and `g2_logit[v]` → `sigmoid` to get `g[v] ∈ (0,1)`.
+- Correlation edges are softly down‑weighted by a learnable `corr_gate` (initialized to −1, so `sigmoid(−1)≈0.27`).
+- Before each message pass for non‑struct views, edge weights are standardized within that view: `ew = (ew - mean) / (std + 1e-6)`.
+- Differential fusion (per layer) treats `struct` as baseline and learns deviations for other views:
+
+```
+h = x + g[struct]*h_s
+      + g[port]*(h_port - h_s)
+      + g[corr_global]*(h_cg - h_s)
+      + g[corr_local]*(h_cl - h_s)
+```
+
+This lets the model say “use structural messages unless another view brings demonstrably different, gated information.”
+
+3) Anchor gather (per sample)
+- The “anchor” is simply the focal asset for which we produce a prediction in this batch entry.
+- Implementation: `z_anchor_pre = H[anchor_idx]` via `_gather_anchor`.
+
+4) Portfolio LOO prototype and residual fusion (strict LOO; signless in forward)
+- We compute per‑sample strict LOO vectors in the same `H` space using only co‑portfolio neighbors (never the anchor itself), with efficient groupwise accumulation over `port_ctx`.
+- In `compute_samplewise_portfolio_vectors_loo(H, anchor_idx, pf_gid, port_ctx)` we return two `B×hidden` tensors:
+  - `V_abs` — absolute prototype (weighted average of others’ `H` vectors using absolute weights).
+  - `V_sgn` — signed prototype, factorized as `(sum_signed_others / sum_abs_others) * V_abs` so its direction follows `V_abs` but magnitude carries signed mass.
+- Both are L2‑normalized by default (with care not to erase signed‑mass semantics of `V_sgn` when it’s zero).
+- In the forward path we intentionally enforce signless behavior for residual subtraction to avoid signed leakage: feed `[V_abs, 0]` to a projection and subtract a gated residual from the anchor:
+
+```
+pf_feat = concat(V_abs, zeros_like(V_abs))
+z_anchor = z_anchor_pre - sigmoid(pf_gate) * pf_proj(pf_feat)
+```
+
+This centers the anchor on a portfolio‑conditioned residual while remaining strictly LOO.
+
+5) Optional sample‑level context encoders
+- Market MLP (`mkt_enc`) and Trade MLP (`trade_enc`): `Linear→ReLU→(Dropout)→Linear` → `hidden`.
+- If enabled and provided, these yield `z_mkt` and `z_trade` appended to the head input (or used in portfolio attention).
+
+6) Optional within‑portfolio self‑attention (off by default)
+- Build a token per sample by concatenating enabled parts among `{z_anchor, z_trade?, z_mkt?}` → project to `Hb`.
+- Pack tokens by `pf_gid` into padded groups (optionally capped by `max_portfolio_len`) and run a `TransformerEncoder`.
+- Fuse back as either:
+  - Residual mode: `z_anchor ← z_anchor + sigmoid(portfolio_gate) * fuse(ctx)`; or
+  - Concat mode: append `sigmoid(portfolio_gate) * fuse(ctx)` to the head input.
+
+7) Optional portfolio head (signless absolute prototype)
+- A small MLP on `V_abs` adds a gated, clean portfolio‑prototype branch to the head input, if enabled.
+
+8) Regression head and deterministic negative drag
+- The head concatenates enabled branches `[z_anchor,(z_mkt?),(z_trade?),(pf_head?),(attn_ctx?)] → MLP → ŷ`.
+- Optional “negative drag” biases outputs away from the co‑portfolio direction (signless) using the learned H‑space:
+
+```
+Vh_abs = compute_samplewise_portfolio_vectors_loo(H, anchor_idx, pf_gid, port_ctx)
+cos_h = |cos( normalize(z_anchor_pre), Vh_abs )|
+yhat = yhat - pf_drag_coef * cos_h
+```
+
+This enforces conservative, portfolio‑aware signals even if the head tries to re‑align with the portfolio axis.
+
+9) Attention diagnostics (optional)
+- If enabled, per‑view attention head mean/std are captured from `TransformerConv` layers per view and per layer, for introspection.
+
+### How inputs are blended to extract portfolio‑conditioned signals
+
+- Multi‑view fusion learns “what counts as a neighbor” via per‑view attention and scalar gates; `struct` is the anchor baseline and other views inject controlled deviations.
+- The anchor embedding is explicitly de‑biased by subtracting a gated projection of the strict‑LOO absolute prototype (signless), preventing leakage of co‑portfolio drift while keeping informative structure.
+- Market/trade branches provide exogenous context per example; optional within‑portfolio attention captures interactions among items that share a `pf_gid` in the current batch.
+- The head operates on this residual‑refined representation; optional negative‑drag further discourages co‑portfolio alignment in the output.
+
+### Exact anchors, portfolios, and port_ctx representation
+
+- Anchor (“what we predict for”) is the sample’s `node_id` at `anchor_idx[i]`.
+- `pf_gid[i]` ties samples that belong to the same portfolio group (e.g., same portfolio/day). `-1` means “no portfolio” for that sample.
+- `port_ctx` is global to the batch step and contains flattened per‑group lines:
+  - `port_nodes_flat: [L]` — node ids of all lines across groups;
+  - `port_w_signed_flat: [L]`, `port_w_abs_flat: [L]` — signed and absolute weights per line;
+  - `port_len: [G]` — counts per group; used to segment the flat arrays.
+- The LOO logic carefully removes all contributions from the anchor node in its own group (even if it appears multiple times) before forming prototypes and normalizing.
+
+### Configuration knobs you will likely touch
+
+In YAML (`configs/mvdgt.default.yaml`) and in `MVDGTModelConfig`:
+- `hidden`, `heads`, `dropout` — width and attention multiplicity of graph/MLPs.
+- `use_portfolio`, `use_market`, `trade_dim` — toggle portfolio residual, market/trade branches.
+- `use_portfolio_attn`, `portfolio_attn_layers/heads/hidden/mode/gate`, `max_portfolio_len` — within‑portfolio interaction encoder.
+- `use_pf_head`, `pf_head_hidden` — auxiliary portfolio‑prototype branch.
+- `use_negative_drag` — deterministic portfolio aversion term at the output.
+
+### How to build and train MV‑DGT
+
+1) Build dataset artifacts (graph views + per‑trade samples):
+
+```
+ptliq-mvdgt-build \
+  --trades-path data/mvdgt/trades.parquet \
+  --graph-dir  data/graph \
+  --pyg-dir    data/pyg \
+  --outdir     data/mvdgt/exp001
+```
+
+This creates: `outdir/samples.parquet`, `outdir/view_masks.pt`, and `outdir/mvdgt_meta.json`, and expects `pyg_dir/pyg_graph.pt` with `edge_index`, `edge_weight`, and `edge_type`.
+
+2) Train the model:
+
+```
+ptliq-mvdgt-train --workdir data/mvdgt/exp001 --pyg-dir data/pyg --epochs 20 --device auto
+```
+
+You can provide a YAML to override defaults: `--config configs/mvdgt.default.yaml`.
+
+3) (Optional) Export ONNX:
+
+```
+ptliq-mvdgt-export-onnx --workdir data/mvdgt/exp001 --outdir models/mvdgt_onnx
+```
+
+### Diagrams
+
+We include several visual summaries under `models/dgt_demo/`:
+- `mv_dgt_concept_v1.png` — early conceptual diagram.
+- `mv_dgt_concept_ppt4x3.png` and `mv_dgt_concept_square.png` — slide/thumbnail layouts.
+
+These are presentation‑only visuals; the definitive behavior is the code and equations above.
